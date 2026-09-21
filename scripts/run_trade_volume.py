@@ -19,7 +19,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="生成逐笔成交量分钟数据")
     parser.add_argument("--start-date", help="起始交易日，闭区间")
     parser.add_argument("--end-date", help="结束交易日，闭区间")
-    parser.add_argument("--input-root", type=Path, default=Path("/data/level2"))
+    parser.add_argument("--input-root", type=Path, default=Path("/sd1-data/level2"))
     parser.add_argument(
         "--output-root",
         type=Path,

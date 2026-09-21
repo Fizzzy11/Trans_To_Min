@@ -28,7 +28,7 @@ def validate_metric_name(name: str) -> str:
 class RunConfig:
     """逐笔转分钟任务的运行配置。"""
 
-    input_root: Path = Path("/data/level2")
+    input_root: Path = Path("/sd1-data/level2")
     output_root: Path = Path("/data/zhangyuan/trans_to_min")
     date_workers: int = 0
     arrow_threads_per_worker: int = 4

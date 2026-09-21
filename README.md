@@ -4,8 +4,8 @@
 框架负责输入适配、分钟切片、股票与分钟补齐、并发调度、增量运行和按月发布；具体
 数据的研究含义和计算公式由独立业务项目实现。
 
-当前稳定版本为`1.0.0`。这是后续业务项目依赖、生产结果追溯和兼容性判断的基础
-版本。版本变更见[CHANGELOG.md](CHANGELOG.md)。
+当前稳定版本为`1.0.1`。这是后续业务项目依赖、生产结果追溯和兼容性判断的当前
+生产版本。版本变更见[CHANGELOG.md](CHANGELOG.md)。
 
 ## 1. 核心能力
 
@@ -87,7 +87,7 @@ python -c "import trans_to_min; print(trans_to_min.__version__)"
 |---|---|---|
 | 通用框架 | `D:\hytp\Trans_To_Min` | `/app/workspace/zhangyuan/Trans_To_Min` |
 | 数据任务根目录 | `D:\hytp\逐笔转分钟数据` | `/app/workspace/zhangyuan/逐笔转分钟数据` |
-| 逐笔输入 | — | `/data/level2` |
+| 逐笔输入 | — | `/sd1-data/level2` |
 | 分钟输出 | — | `/data/zhangyuan/trans_to_min` |
 
 本仓库结构：
@@ -120,7 +120,7 @@ Trans_To_Min/
 框架识别以下固定路径：
 
 ```text
-/data/level2/{dataset}/{YYYY}/{YYYYMM}/{YYYYMMDD}_{dataset}.parquet
+/sd1-data/level2/{dataset}/{YYYY}/{YYYYMM}/{YYYYMMDD}_{dataset}.parquet
 ```
 
 `dataset`只能是：
@@ -320,7 +320,7 @@ from pathlib import Path
 from trans_to_min import MinuteConversionRunner, RunConfig
 
 config = RunConfig(
-    input_root=Path("/data/level2"),
+    input_root=Path("/sd1-data/level2"),
     output_root=Path(
         "/data/zhangyuan/trans_to_min/example_min/basic_min"
     ),
@@ -344,7 +344,7 @@ cd /app/workspace/zhangyuan/Trans_To_Min
 /app/workspace/zhangyuan/.venv/bin/python scripts/run_trade_volume.py \
   --start-date 2025-01-02 \
   --end-date 2025-01-31 \
-  --input-root /data/level2 \
+  --input-root /sd1-data/level2 \
   --output-root /data/zhangyuan/trans_to_min/example_min/basic_min \
   --date-workers 0 \
   --arrow-threads-per-worker 4 \
@@ -402,7 +402,7 @@ runner.run(dates)
 
 | 参数 | 默认值 | 作用 |
 |---|---:|---|
-| `input_root` | `/data/level2` | 三类逐笔输入根目录 |
+| `input_root` | `/sd1-data/level2` | 三类逐笔输入根目录 |
 | `output_root` | `/data/zhangyuan/trans_to_min` | 单指标的类别目录或指标组共享暂存根目录 |
 | `date_workers` | `0` | 日期进程数；`0`表示自动选择，正整数表示固定值 |
 | `arrow_threads_per_worker` | `4` | 每个日期进程最多使用的PyArrow线程数 |
@@ -526,8 +526,8 @@ python -m unittest discover -s tests -v
 - 次版本变化用于向后兼容的新能力；
 - 主版本变化可能包含接口或固定口径调整。
 
-`1.0.0`固定了当前输入路径、242分钟轴、标准输出Schema、运行配置和发布语义。任何
-可能改变历史结果的修改，都应提升版本、更新变更记录，并在正式数据README和
-manifest中保留所用框架版本。
+`1.0.0`建立了242分钟轴、标准输出Schema、运行配置和发布语义的基础契约；
+`1.0.1`将生产输入根目录固定为`/sd1-data/level2`。任何可能改变历史结果的修改，
+都应提升版本、更新变更记录，并在正式数据README和manifest中保留所用框架版本。
 
 GitHub仓库：<https://github.com/Fizzzy11/Trans_To_Min>
