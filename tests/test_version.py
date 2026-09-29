@@ -14,9 +14,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 class VersionTest(unittest.TestCase):
     def test_version_uses_runtime_single_source(self) -> None:
-        """确认1.0.1生产版本及动态打包版本来源。"""
+        """确认1.0.2生产版本及动态打包版本来源。"""
 
-        self.assertEqual(__version__, "1.0.1")
+        self.assertEqual(__version__, "1.0.2")
         with (PROJECT_ROOT / "pyproject.toml").open("rb") as stream:
             configuration = tomllib.load(stream)
         self.assertEqual(configuration["project"]["dynamic"], ["version"])
@@ -30,7 +30,8 @@ class VersionTest(unittest.TestCase):
 
         readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
         changelog = (PROJECT_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-        self.assertIn("当前稳定版本为`1.0.1`", readme)
+        self.assertIn("当前稳定版本为`1.0.2`", readme)
+        self.assertIn("## 1.0.2（2026-09-29）", changelog)
         self.assertIn("## 1.0.1（2026-09-21）", changelog)
         self.assertIn("/sd1-data/level2", readme)
         retired_root = "/" + "data" + "/level2"
