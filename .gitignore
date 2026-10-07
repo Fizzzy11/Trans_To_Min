@@ -26,3 +26,7 @@ Thumbs.db
 .group_staging/
 *.tmp
 *.log
+
+# 部署留存、来源清单和隔离实验不作为框架源码发布。
+/reports/
+/development/

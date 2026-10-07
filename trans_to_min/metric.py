@@ -28,6 +28,9 @@ class MinuteMetric(ABC):
     股票并集、左开右闭分钟标签、空分钟填充、结果校验和存储。
     """
 
+    algorithm_version = "1"
+    contract_parameters: dict = {}
+    required_price_policy_version: int | None = None
     name = ""
     inputs: tuple[str, ...] = ()
     input_columns: dict[str, tuple[str, ...]] = {}
@@ -184,7 +187,10 @@ class MinuteMetric(ABC):
         nullable_integer_type = PANDAS_NULLABLE_INTEGER_TYPES.get(self.value_type)
         target_type = (
             nullable_integer_type
-            if self.empty_value is None and nullable_integer_type is not None
+            if nullable_integer_type is not None and (
+                self.empty_value is None
+                or (not aggregated.empty and aggregated[self.name].isna().any())
+            )
             else self.value_type
         )
         labels = minute_labels(trade_date)
@@ -226,6 +232,7 @@ class MinuteMetric(ABC):
         result.insert(0, "trade_date", pd.Timestamp(trade_date).date())
         if len(result) != row_count:
             raise RuntimeError(f"分钟补齐后行数异常：{len(result)} != {row_count}")
+        result.attrs.update(aggregated.attrs)
         return result
 
     def _dense_values(
@@ -242,8 +249,9 @@ class MinuteMetric(ABC):
         valid_source = source.loc[source.notna()]
         if target_type in PANDAS_NULLABLE_INTEGER_TYPES.values():
             numpy_type = np.int64 if target_type == "Int64" else np.uint64
-            data = np.zeros(row_count, dtype=numpy_type)
-            mask = np.ones(row_count, dtype=bool)
+            data = np.full(row_count, self.empty_value or 0, dtype=numpy_type)
+            mask = np.full(row_count, self.empty_value is None, dtype=bool)
+            mask[positions[~source_notna]] = True
             if len(valid_positions):
                 data[valid_positions] = valid_source.to_numpy(dtype=numpy_type, copy=False)
                 mask[valid_positions] = False
@@ -256,6 +264,8 @@ class MinuteMetric(ABC):
                 raise TypeError(f"{target_type}空分钟必须使用可空整数类型")
             fill_value = np.nan
         data = np.full(row_count, fill_value, dtype=numpy_type)
+        if (~source_notna).any():
+            data[positions[~source_notna]] = np.nan
         if len(valid_positions):
             data[valid_positions] = valid_source.to_numpy(dtype=numpy_type, copy=False)
         return data

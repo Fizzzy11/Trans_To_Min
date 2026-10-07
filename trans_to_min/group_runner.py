@@ -17,6 +17,7 @@ from pathlib import Path
 from ._version import __version__
 from .adapter import L2InputAdapter, input_path, validate_matching_date_sets
 from .config import RunConfig
+from .provenance import source_contract, validate_resume
 from .group import MinuteMetricGroup
 from .resources import (
     process_peak_memory_bytes,
@@ -118,6 +119,12 @@ def _process_one_group_day(
     """单日一次读取组内物理输入，并分别写入所选指标临时分片。"""
 
     started = time.perf_counter()
+    contracts = {
+        name: source_contract(
+            group.metric(name), trade_date, config.input_root, group=group
+        )
+        for name in metric_names
+    }
     adapter = L2InputAdapter(config.input_root)
     inputs = {
         dataset: adapter.read(dataset, trade_date, group.input_columns[dataset])
@@ -140,6 +147,13 @@ def _process_one_group_day(
             / metric.name
             / f"{trade_date:%Y%m%d}.parquet"
         )
+        if source_contract(
+            metric, trade_date, config.input_root, group=group
+        ) != contracts[metric.name]:
+            raise RuntimeError("组计算期间来源或算法发生变化，拒绝发布")
+        frame.attrs["source_contracts"] = {
+            trade_date.isoformat(): contracts[metric.name]
+        }
         output = write_day_frame(
             frame,
             path,
@@ -147,6 +161,8 @@ def _process_one_group_day(
             metric.value_type,
             config,
         )
+        output["source_contract"] = contracts[metric.name]
+        output["price_quality"] = frame.attrs.get("price_quality", {})
         output["symbols"] = int(frame["symbol"].nunique()) if not frame.empty else 0
         outputs[metric.name] = output
     missing = sorted(requested - set(outputs))
@@ -508,6 +524,16 @@ class MinuteMetricGroupRunner:
                     )
                     & requested
                 )
+        if self.config.resume:
+            for name in self.group.metric_names:
+                for month, requested in grouped.items():
+                    validate_resume(
+                        month_path(self.output_roots[name], name, month),
+                        self.group.metric(name),
+                        requested & result[name],
+                        self.config.input_root,
+                        group=self.group,
+                    )
         return result
 
     def _validate_input_files(self, dates: list[date]) -> None:

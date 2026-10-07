@@ -15,6 +15,7 @@ from pathlib import Path
 from ._version import __version__
 from .adapter import L2InputAdapter, input_path, validate_matching_date_sets
 from .config import RunConfig
+from .provenance import source_contract, validate_resume
 from .metric import MinuteMetric
 from .resources import (
     process_peak_memory_bytes,
@@ -123,16 +124,22 @@ def _process_one_day(
     """子进程执行一个交易日的读取、计算和临时写入。"""
 
     started = time.perf_counter()
+    contract = source_contract(metric, trade_date, config.input_root)
     adapter = L2InputAdapter(config.input_root)
     inputs = {
         dataset: adapter.read(dataset, trade_date, metric.input_columns[dataset])
         for dataset in metric.inputs
     }
     result = metric.compute_day(trade_date, inputs)
+    if source_contract(metric, trade_date, config.input_root) != contract:
+        raise RuntimeError("计算期间来源或算法发生变化，拒绝发布")
+    result.attrs["source_contracts"] = {trade_date.isoformat(): contract}
     path = staging_root / trade_date.strftime("%Y%m") / f"{trade_date:%Y%m%d}.parquet"
     output = write_day_frame(result, path, metric.name, metric.value_type, config)
     output.update(
         {
+            "source_contract": contract,
+            "price_quality": result.attrs.get("price_quality", {}),
             "date": trade_date.isoformat(),
             "symbols": int(result["symbol"].nunique()) if not result.empty else 0,
             "elapsed_seconds": round(time.perf_counter() - started, 3),
@@ -553,6 +560,14 @@ class MinuteConversionRunner:
                 )
                 & requested
             )
+        if self.config.resume:
+            for month, requested in grouped.items():
+                validate_resume(
+                    month_path(self.config.output_root, self.metric.name, month),
+                    self.metric,
+                    requested & existing,
+                    self.config.input_root,
+                )
         return existing
 
     def _validate_input_files(self, dates: list[date]) -> None:

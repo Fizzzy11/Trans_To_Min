@@ -59,7 +59,10 @@ class L2InputAdapter:
             split_blocks=True,
             self_destruct=True,
         )
-        normalized = self._normalize(dataset, frame, requested, metadata)
+        integer_columns = {
+            field.name for field in parquet.schema_arrow if pa.types.is_integer(field.type)
+        }
+        normalized = self._normalize(dataset, frame, requested, metadata, integer_columns)
         return normalized.reindex(columns=requested)
 
     @staticmethod
@@ -74,6 +77,8 @@ class L2InputAdapter:
             if name in DERIVED_DEPENDENCIES:
                 physical.update(DERIVED_DEPENDENCIES[name])
             elif name == "money" and "money" not in schema_names:
+                if dataset == "chengjiao":
+                    raise ValueError("成交必须读取原money，不能用price×volume伪造")
                 physical.update(("price", "volume"))
             elif name in schema_names:
                 physical.add(name)
@@ -92,6 +97,7 @@ class L2InputAdapter:
         frame: pd.DataFrame,
         requested: Sequence[str],
         metadata: dict[bytes, bytes],
+        integer_columns: set[str] | None = None,
     ) -> pd.DataFrame:
         # frame只在本次读取中使用，直接原位归一化可避免复制整张单日逐笔表。
         result = frame
@@ -114,11 +120,15 @@ class L2InputAdapter:
             result["timestamp"] = timestamp.dt.tz_localize(TIMEZONE)
 
         if "price" in requested or ("money" in requested and "money" not in result):
-            result["price"] = _normalize_scaled_number(result["price"], metadata, b"price_scale")
+            result["price"] = _normalize_scaled_number(
+                result["price"], metadata, b"price_scale",
+                integer_encoded=None if integer_columns is None else "price" in integer_columns,
+            )
         if "money" in requested:
             if "money" in result:
                 result["money"] = _normalize_scaled_number(
-                    result["money"], metadata, b"money_scale"
+                    result["money"], metadata, b"money_scale",
+                    integer_encoded=None if integer_columns is None else "money" in integer_columns,
                 )
             else:
                 result["money"] = (
@@ -201,8 +211,12 @@ def _normalize_scaled_number(
     values: pd.Series,
     metadata: dict[bytes, bytes],
     scale_key: bytes,
+    *,
+    integer_encoded: bool | None = None,
 ) -> pd.Series:
-    if not pd.api.types.is_integer_dtype(values.dtype):
+    # 可空Arrow整数转Pandas后可能成为浮点列，缩放必须以物理Schema为准。
+    encoded = pd.api.types.is_integer_dtype(values.dtype) if integer_encoded is None else integer_encoded
+    if not encoded:
         return pd.to_numeric(values, errors="raise").astype("float64")
     raw_scale = metadata.get(scale_key)
     if raw_scale is None:

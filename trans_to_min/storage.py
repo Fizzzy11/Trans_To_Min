@@ -11,6 +11,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
+from .provenance import read_contracts
 from .config import RunConfig, TIMEZONE, validate_metric_name
 
 
@@ -86,6 +87,13 @@ def write_day_frame(
     """写入并回读校验单日临时分片。"""
 
     schema = output_schema(metric_name, value_type)
+    if frame.attrs.get("source_contracts"):
+        schema = schema.with_metadata({
+            **schema.metadata,
+            b"source_contracts": json.dumps(
+                frame.attrs["source_contracts"], sort_keys=True
+            ).encode(),
+        })
     table = pa.Table.from_pandas(
         frame.reindex(columns=schema.names),
         schema=schema,
@@ -139,6 +147,16 @@ def publish_month(
             "日分片日期与待发布日期不一致："
             f"day_paths={sorted(new_paths)}, replaced_dates={sorted(replaced_dates)}"
         )
+    contracts = read_contracts(destination)
+    for value in replaced_dates:
+        contracts.pop(value.isoformat(), None)
+    for path in day_paths:
+        contracts.update(read_contracts(path))
+    if contracts:
+        schema = schema.with_metadata({
+            **schema.metadata,
+            b"source_contracts": json.dumps(contracts, sort_keys=True).encode(),
+        })
     existing_dates: set[date] = set()
     written_rows = 0
     written_dates: list[date] = []
