@@ -16,7 +16,7 @@ class VersionTest(unittest.TestCase):
     def test_version_uses_runtime_single_source(self) -> None:
         """确认待发布版本及动态打包版本来源。"""
 
-        self.assertEqual(__version__, "1.1.0")
+        self.assertEqual(__version__, "1.2.0")
         with (PROJECT_ROOT / "pyproject.toml").open("rb") as stream:
             configuration = tomllib.load(stream)
         self.assertEqual(configuration["project"]["dynamic"], ["version"])
@@ -30,7 +30,8 @@ class VersionTest(unittest.TestCase):
 
         readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
         changelog = (PROJECT_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-        self.assertIn("当前稳定版本为`1.1.0`", readme)
+        self.assertIn("当前稳定版本为`1.2.0`", readme)
+        self.assertIn("## 1.2.0（2026-10-22）", changelog)
         self.assertIn("## 1.1.0（2026-10-08）", changelog)
         self.assertIn("## 1.0.3（2026-10-01）", changelog)
         self.assertIn("## 1.0.2（2026-09-29）", changelog)
