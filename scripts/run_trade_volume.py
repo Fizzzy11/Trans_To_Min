@@ -23,7 +23,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-root",
         type=Path,
-        default=Path("/data/zhangyuan/trans_to_min"),
+        default=Path("/sd1-data/trans_to_min"),
     )
     parser.add_argument(
         "--date-workers",

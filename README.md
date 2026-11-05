@@ -4,10 +4,22 @@
 框架负责输入适配、分钟切片、股票与分钟补齐、并发调度、增量运行和按月发布；具体
 数据的研究含义和计算公式由独立业务项目实现。
 
-当前稳定版本为`1.2.0`。这是后续业务项目依赖、生产结果追溯和兼容性判断的当前
+当前稳定版本为`1.2.1`。这是后续业务项目依赖、生产结果追溯和兼容性判断的当前
 生产版本。版本变更见[CHANGELOG.md](CHANGELOG.md)。
 
-### 1.2.0：从历史全量转为每日更新
+### 1.2.1：仅调整默认输出根目录
+
+`RunConfig.output_root`与参考脚本`run_trade_volume.py`的默认输出改为
+`/sd1-data/trans_to_min`。正式业务仍采用
+`/sd1-data/trans_to_min/{主题}/{类别}/{指标}/{年份}/{年月}.parquet`，
+主题和类别仍由业务入口显式配置，框架不自动推断。
+
+显式指定的输出路径继续有效；标准入口仍要求传入`--output-root`，不增加隐式默认。
+本次只更新框架，不创建生产目录、不设置权限、不迁移现有数据，也不修改三类业务
+及下游脚本；既有数据实际位置与后续迁移状态须另行核对。启用新默认值前须先由
+授权人员准备好目录和权限，不自动回退旧目录。详见[1.2.1发布说明](docs/发布说明_1.2.1.md)。
+
+### 沿用1.2.0：从历史全量转为每日更新
 
 业务只维护一套指标类和一套入口，通过`full`、`daily`、`repair`切换显式日期范围及
 恢复/覆盖策略。标准入口为`trans_to_min.task_entry.run_task_cli`，安全模板见
@@ -18,7 +30,7 @@
   接入、历史验收、日更切换、漏日对账与修订约定。
 - 编写后续总调度器前，遵循[统一日更调度接入约定](docs/统一日更调度接入约定.md)，
   使用显式注册表、结果JSON、退出码、同指标锁和全局资源预算。
-- 本次新增能力、升级注意事项和未实现边界见[1.2.0发布说明](docs/发布说明_1.2.0.md)。
+- 标准入口能力、升级注意事项和未实现边界见[1.2.0发布说明](docs/发布说明_1.2.0.md)。
 
 每日执行顺序为“就绪检查→生成→发布→独立校验”。首次全量若需交错校验，必须另接
 外部编排；标准入口本身不提供交错队列、交易日历、定时任务或跨任务总调度器。
@@ -32,7 +44,7 @@
 `/app/workspace/zhangyuan/test_make_dir/逐笔数据存储优化/docs/`。
 
 raw生成框架1.2.0与分钟框架自1.1.0起通过同一份三表契约衔接：报价口径3、物理格式1。
-当前分钟框架1.2.0保持该消费契约，不改变raw定价或三表结构。
+当前分钟框架1.2.1保持该消费契约，不改变raw定价或三表结构。
 两个软件版本独立演进，不能要求其版本号相等。完整逻辑及实际能力边界见
 [逐笔三表到分钟统一契约](docs/逐笔三表到分钟统一契约.md)。
 本框架已提供物理Schema缩放、显式订单视图、NULL金额保留及逐指标日期来源契约。
@@ -126,7 +138,7 @@ python -c "import trans_to_min; print(trans_to_min.__version__)"
 | 通用框架 | `D:\hytp\Trans_To_Min` | `/app/workspace/zhangyuan/Trans_To_Min` |
 | 数据任务根目录 | `D:\hytp\逐笔转分钟数据` | `/app/workspace/zhangyuan/逐笔转分钟数据` |
 | 逐笔输入 | — | `/sd1-data/level2` |
-| 分钟输出 | — | `/data/zhangyuan/trans_to_min` |
+| 分钟输出（当前默认约定，不表示历史已迁移） | — | `/sd1-data/trans_to_min` |
 
 本仓库结构：
 
@@ -153,7 +165,7 @@ Trans_To_Min/
 正式指标不得直接堆入本仓库。每项业务数据应在“逐笔转分钟数据”任务根目录下建立
 独立、自包含的任务目录，保存指标逻辑、运行入口、测试、校验和说明文档。任务目录名
 必须使用小写英文字母、数字和下划线，并与该数据在
-`/data/zhangyuan/trans_to_min/`下的主题目录名完全一致；中文仅用于任务总目录和
+`/sd1-data/trans_to_min/`下的主题目录名完全一致；中文仅用于任务总目录和
 文档内容。例如生产主题目录为`time_center_min/`时，任务目录也应为
 `逐笔转分钟数据/time_center_min/`。主题目录名称变更时，两处应同步调整。
 
@@ -305,7 +317,7 @@ dtype。委托/撤单缺价仍保留记录与数量，派生money也为空，不
 生产输出采用“主题→类别→指标”三级结构：
 
 ```text
-/data/zhangyuan/trans_to_min/
+/sd1-data/trans_to_min/
 └── {topic_name}_min/
     └── {category_name}_min/                 # RunConfig.output_root
         └── {business_name}_min/
@@ -448,7 +460,7 @@ from trans_to_min import MinuteConversionRunner, RunConfig
 config = RunConfig(
     input_root=Path("/sd1-data/level2"),
     output_root=Path(
-        "/data/zhangyuan/trans_to_min/example_min/basic_min"
+        "/sd1-data/trans_to_min/example_min/basic_min"
     ),
     date_workers=0,
     resume=True,
@@ -471,7 +483,7 @@ cd /app/workspace/zhangyuan/Trans_To_Min
   --start-date 2025-01-02 \
   --end-date 2025-01-31 \
   --input-root /sd1-data/level2 \
-  --output-root /data/zhangyuan/trans_to_min/example_min/basic_min \
+  --output-root /sd1-data/trans_to_min/example_min/basic_min \
   --date-workers 0 \
   --arrow-threads-per-worker 4 \
   --resume
@@ -553,7 +565,7 @@ runner.run(dates)
 | 参数 | 默认值 | 作用 |
 |---|---:|---|
 | `input_root` | `/sd1-data/level2` | 三类逐笔输入根目录 |
-| `output_root` | `/data/zhangyuan/trans_to_min` | 单指标的类别目录或指标组共享暂存根目录 |
+| `output_root` | `/sd1-data/trans_to_min` | 单指标的类别目录或指标组共享暂存根目录 |
 | `date_workers` | `0` | 日期进程数；`0`表示自动选择，正整数表示固定值 |
 | `arrow_threads_per_worker` | `4` | 每个日期进程最多使用的PyArrow线程数 |
 | `row_group_size` | `500000` | 正式及暂存Parquet的目标Row Group行数 |
@@ -702,5 +714,9 @@ python -m pytest tests -q -p no:cacheprovider
 `1.2.0`增加标准任务入口与全量转日更约定，原指标和月文件格式不变。源码与版本
 仍参与逐日契约；已有`1.1.0`输出不会自动获得新凭证。仅追加新日也不等于审核了
 全部历史口径，生产切换须按标准流程记录版本及验收范围。
+
+`1.2.1`仅改变默认输出根目录，业务公式、输入位置、分钟轴、存储层级和并行逻辑
+保持不变。版本与默认值所在源码仍参与来源契约，不能把旧日期的凭证改标为1.2.1，
+也不能为通过resume门禁自行重算历史；只追加新日期不要求重算未请求的旧日期。
 
 GitHub仓库：<https://github.com/Fizzzy11/Trans_To_Min>
