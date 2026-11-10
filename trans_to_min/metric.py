@@ -37,7 +37,7 @@ class MinuteMetric(ABC):
     value_type = "float64"
     empty_value: float | int | None = None
     include_pre_market = True
-    include_post_market = True
+    include_post_market = False
 
     def __init_subclass__(cls, **kwargs) -> None:
         super().__init_subclass__(**kwargs)

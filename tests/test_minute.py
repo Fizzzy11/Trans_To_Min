@@ -6,6 +6,7 @@ import unittest
 from trans_to_min.minute import (
     assign_minute_codes,
     assign_minute_labels,
+    assign_timestamp_minute_codes,
     minute_labels,
 )
 
@@ -52,7 +53,7 @@ class MinuteBoundaryTest(unittest.TestCase):
             "13:01:00",
             "14:59:00",
             "15:00:00",
-            "15:00:00",
+            None,
         ]
         actual = [
             None if pd.isna(value) else value.strftime("%H:%M:%S")
@@ -80,7 +81,7 @@ class MinuteBoundaryTest(unittest.TestCase):
         )
         self.assertEqual(
             assign_minute_codes(time_ms).tolist(),
-            [0, 0, 1, 1, 120, 120, -1, 121, 122, 240, 241, 241],
+            [0, 0, 1, 1, 120, 120, -1, 121, 122, 240, 241, -1],
         )
         without_extensions = assign_minute_codes(
             time_ms,
@@ -89,3 +90,54 @@ class MinuteBoundaryTest(unittest.TestCase):
         )
         self.assertEqual(without_extensions.iloc[0], -1)
         self.assertEqual(without_extensions.iloc[-1], -1)
+
+    def test_default_close_boundary_excludes_later_milliseconds(self) -> None:
+        """15:00结束标签只接收(14:59, 15:00]内的毫秒事件。"""
+
+        time_ms = pd.Series(
+            [53_940_000, 53_940_001, 53_999_999, 54_000_000,
+             54_000_001, 55_800_000, 86_399_999],
+            dtype="uint32",
+        )
+        self.assertEqual(
+            assign_minute_codes(time_ms).tolist(),
+            [240, 241, 241, 241, -1, -1, -1],
+        )
+
+    def test_timestamp_defaults_use_local_close_boundary(self) -> None:
+        """两个时间戳入口均默认排除盘后，时区转换不改变截止时刻。"""
+
+        values = pd.Series(pd.to_datetime(
+            ["2025-01-02 14:59:00", "2025-01-02 14:59:00.001",
+             "2025-01-02 14:59:59.999", "2025-01-02 15:00:00",
+             "2025-01-02 15:00:00.001", "2025-01-02 15:30:00"],
+            format="mixed",
+        ))
+        for timestamps in (values, values.dt.tz_localize("Asia/Shanghai").dt.tz_convert("UTC")):
+            with self.subTest(timezone=str(timestamps.dt.tz)):
+                self.assertEqual(
+                    assign_timestamp_minute_codes(timestamps).tolist(),
+                    [240, 241, 241, 241, -1, -1],
+                )
+                labels = assign_minute_labels(timestamps, "2025-01-02")
+                self.assertEqual(
+                    [None if pd.isna(value) else value.strftime("%H:%M:%S")
+                     for value in labels],
+                    ["14:59:00", "15:00:00", "15:00:00", "15:00:00", None, None],
+                )
+
+    def test_explicit_post_market_opt_in_preserves_legacy_mapping(self) -> None:
+        """显式开启盘后折入仍可复现旧映射，不增加分钟标签。"""
+
+        time_ms = pd.Series([54_000_001, 55_800_000, 86_399_999], dtype="uint32")
+        timestamps = pd.Series(pd.to_datetime(
+            ["2025-01-02 15:00:00.001", "2025-01-02 15:30:00",
+             "2025-01-02 23:59:59.999"], format="mixed",
+        ))
+        self.assertEqual(assign_minute_codes(time_ms, include_post_market=True).tolist(), [241] * 3)
+        self.assertEqual(
+            assign_timestamp_minute_codes(timestamps, include_post_market=True).tolist(),
+            [241] * 3,
+        )
+        labels = assign_minute_labels(timestamps, "2025-01-02", include_post_market=True)
+        self.assertEqual(labels.dt.strftime("%H:%M:%S").tolist(), ["15:00:00"] * 3)

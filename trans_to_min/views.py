@@ -101,7 +101,10 @@ def trade_order_participation(
     source = source.loc[source["order_num"].gt(0)].copy()
     keys = ["symbol", "channel", "order_side", "order_num"]
     if time_scope == "per_minute":
-        source["minute_code"] = assign_minute_codes(source["time_ms"]).to_numpy()
+        # 保留既有视图分组，不提前裁掉盘后；最终范围由调用方或基类分钟开关控制。
+        source["minute_code"] = assign_minute_codes(
+            source["time_ms"], include_post_market=True,
+        ).to_numpy()
         source = source.loc[source["minute_code"].ge(0)]
         keys.append("minute_code")
     return source.groupby(keys, sort=False, observed=True)["time_ms"].min().reset_index()

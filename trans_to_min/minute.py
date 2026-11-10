@@ -46,12 +46,13 @@ def assign_minute_labels(
     trade_date: date | str | pd.Timestamp,
     *,
     include_pre_market: bool = True,
-    include_post_market: bool = True,
+    include_post_market: bool = False,
 ) -> pd.Series:
     """按框架固定的左开右闭规则为逐笔事件分配分钟结束标签。
 
-    常规区间采用 ``(上一分钟, 当前分钟]``。09:30、11:30、13:00和
-    15:00使用本框架定义的特殊边界；未落入任何区间的午休记录返回NaT。
+    常规区间采用 ``(上一分钟, 当前分钟]``。09:30、11:30、13:00
+    保留特殊边界；15:00默认只包含(14:59, 15:00]，其余午休及盘后记录返回NaT。
+    显式开启include_post_market才把盘后事件折入15:00。
     """
 
     codes = assign_timestamp_minute_codes(
@@ -67,9 +68,9 @@ def assign_timestamp_minute_codes(
     timestamps: pd.Series,
     *,
     include_pre_market: bool = True,
-    include_post_market: bool = True,
+    include_post_market: bool = False,
 ) -> pd.Series:
-    """把完整时间戳转换为紧凑分钟编码。"""
+    """按源数据毫秒精度转换时间戳，默认排除15:00之后的盘后事件。"""
 
     values = pd.to_datetime(timestamps, errors="raise")
     if values.dt.tz is None:
@@ -93,12 +94,13 @@ def assign_minute_codes(
     time_ms: pd.Series,
     *,
     include_pre_market: bool = True,
-    include_post_market: bool = True,
+    include_post_market: bool = False,
 ) -> pd.Series:
     """根据午夜以来毫秒数计算0至241的分钟编码。
 
     编码与 :func:`minute_labels` 一一对应；不属于交易分钟轴的记录使用 ``-1``。
     该函数只进行整数数组运算，是大规模逐笔数据的推荐切片路径。
+    默认15:00结束标签只接收(14:59, 15:00]；显式开启盘后折入可兼容旧映射。
     """
 
     numeric = pd.to_numeric(time_ms, errors="raise")
