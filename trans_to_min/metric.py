@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Iterable
 from datetime import date
 
 import numpy as np
@@ -125,17 +126,28 @@ class MinuteMetric(ABC):
         trade_date: date,
         inputs: dict[str, pd.DataFrame],
         aggregated: pd.DataFrame,
+        symbols: Iterable[str] | None = None,
     ) -> pd.DataFrame:
         """校验稀疏分钟聚合结果并补齐为标准单指标日长表。
 
         该公开方法供同源指标组复用共享聚合结果。普通指标仍直接使用
         ``compute_day``，无需调用本方法。
+
+        ``symbols``可选：指标组已对同一份inputs算好股票全集时传入，避免每个指标
+        各扫描一次整张逐笔表。传入值必须等于``symbol_union(inputs)``，即本指标
+        声明的全部输入中实际出现的非空symbol（先于时间及方向筛选）；不传时行为不变。
         """
 
         missing = sorted(set(self.inputs) - set(inputs))
         if missing:
             raise ValueError(f"缺少指标输入：{missing}")
-        symbols = self.symbol_union(inputs)
+        if symbols is None:
+            symbols = self.symbol_union(inputs)
+        else:
+            values = list(symbols)
+            if any(value is None or pd.isna(value) for value in values):
+                raise ValueError("symbols不能包含空值")
+            symbols = sorted({str(value) for value in values})
         if not symbols:
             return self._empty_output()
         self._validate_aggregated(aggregated)

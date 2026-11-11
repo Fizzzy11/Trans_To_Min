@@ -10,6 +10,7 @@ import pyarrow as pa
 
 from trans_to_min.metric import MinuteMetric
 from trans_to_min.metrics import MinuteTradeVolume
+from trans_to_min.minute import minute_labels
 from trans_to_min.storage import metric_root, output_schema
 from trans_to_min.views import trade_order_participation
 
@@ -138,6 +139,36 @@ class MetricTest(unittest.TestCase):
             & (result["minute"].dt.strftime("%H:%M:%S") == "09:31:00")
         ]
         self.assertEqual(empty["trade_volume_min"].iloc[0], 0)
+
+    def test_finalize_with_explicit_symbols_matches_symbol_union(self) -> None:
+        """显式传入股票全集与框架自行取并集结果相同，空值全集被拒绝。"""
+
+        frame = pd.DataFrame(
+            {
+                "symbol": pd.Categorical(["600000.XSHG", "000001.XSHE", "300750.XSHE"]),
+                "time_ms": pd.Series([34_200_001, 34_259_999, 54_000_001], dtype="uint32"),
+                "volume": pd.Series([100, 200, 50], dtype="uint64"),
+            }
+        )
+        metric = MinuteTradeVolume()
+        day = date(2025, 1, 2)
+        sparse = pd.DataFrame(
+            {
+                "symbol": ["000001.XSHE"],
+                "minute": pd.Categorical.from_codes([1], categories=minute_labels(day), ordered=True),
+                metric.name: pd.Series([200], dtype="uint64"),
+            }
+        )
+        inputs = {"chengjiao": frame}
+        expected = metric.finalize_aggregated_day(day, inputs, sparse.copy())
+        explicit = metric.finalize_aggregated_day(
+            day, inputs, sparse.copy(),
+            symbols=["300750.XSHE", "000001.XSHE", "600000.XSHG", "300750.XSHE"],
+        )
+        pd.testing.assert_frame_equal(explicit, expected)
+        self.assertEqual(len(explicit), 3 * 242)
+        with self.assertRaisesRegex(ValueError, "空值"):
+            metric.finalize_aggregated_day(day, inputs, sparse.copy(), symbols=["000001.XSHE", None])
 
     def test_default_trade_volume_keeps_close_but_excludes_post_market(self) -> None:
         """默认基类在聚合前排除映射后无效的盘后事件，保留输入股票全集。"""

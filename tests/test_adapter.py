@@ -122,3 +122,35 @@ class AdapterTest(unittest.TestCase):
         )
         self.assertEqual(result["price"].iloc[0], 9.43)
         self.assertEqual(result["money"].iloc[0], 943.0)
+
+
+class UnsignedConversionTest(unittest.TestCase):
+    """数量与订单号转uint64前须拒绝负数、小数和空值，不能静默绕回或截断。"""
+
+    @staticmethod
+    def _normalize(column: str, values: pd.Series) -> pd.DataFrame:
+        return L2InputAdapter._normalize("weituo", pd.DataFrame({column: values}), (column,), METADATA)
+
+    def test_unsigned_physical_columns_convert_without_change(self) -> None:
+        result = self._normalize("volume", pd.Series([0, 7, 2**32 - 1], dtype="uint32"))
+        self.assertEqual(result["volume"].dtype, "uint64")
+        self.assertEqual(result["volume"].tolist(), [0, 7, 2**32 - 1])
+
+    def test_valid_signed_and_float_sources_still_convert(self) -> None:
+        for values in (pd.Series([1, 2], dtype="int64"), pd.Series([1.0, 2.0]), pd.Series([1, 2], dtype="Int64")):
+            result = self._normalize("order_num", values)
+            self.assertEqual(result["order_num"].dtype, "uint64")
+            self.assertEqual(result["order_num"].tolist(), [1, 2])
+
+    def test_invalid_values_are_rejected(self) -> None:
+        cases = {
+            "负数": pd.Series([5, -5], dtype="int64"),
+            "小数": pd.Series([1.0, 1.7]),
+            "空值": pd.Series([1, None], dtype="Int64"),
+            "非有限": pd.Series([1.0, float("inf")]),
+        }
+        for message, values in cases.items():
+            for column in ("volume", "buy_order_num"):
+                with self.subTest(message=message, column=column):
+                    with self.assertRaisesRegex(ValueError, message):
+                        self._normalize(column, values)

@@ -4,6 +4,7 @@ from collections.abc import Iterable, Sequence
 from datetime import date
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -138,12 +139,38 @@ class L2InputAdapter:
         if "type" in requested and "type" in result:
             result["type"] = _normalize_type(result["type"], metadata)
 
-        if "volume" in result:
-            result["volume"] = pd.to_numeric(result["volume"], errors="raise").astype("uint64")
-        for name in ("order_num", "buy_order_num", "sell_order_num"):
+        for name in ("volume", "order_num", "buy_order_num", "sell_order_num"):
             if name in result:
-                result[name] = pd.to_numeric(result[name], errors="raise").astype("uint64")
+                result[name] = _to_unsigned_integer(result[name], f"{dataset}.{name}")
         return result
+
+
+def _to_unsigned_integer(values: pd.Series, label: str) -> pd.Series:
+    """非负整数字段统一转uint64；有符号、浮点或可空来源先拒绝空值、负数和小数。
+
+    直接``astype("uint64")``会把负数静默绕回为极大值、把小数静默截断，业务层事后
+    无法识别，因此必须在转换前检查。无符号物理列不可能为负或小数，只做零开销转换。
+    """
+
+    if pd.api.types.is_unsigned_integer_dtype(values.dtype):
+        return values.astype("uint64", copy=False)
+    numeric = pd.to_numeric(values, errors="raise")
+    if numeric.isna().any():
+        raise ValueError(f"{label} 存在空值，不能转为无符号整数")
+    if pd.api.types.is_integer_dtype(numeric.dtype) or pd.api.types.is_bool_dtype(numeric.dtype):
+        if bool((numeric < 0).any()):
+            raise ValueError(f"{label} 存在负数，不能转为无符号整数")
+        return numeric.astype("uint64")
+    floats = numeric.to_numpy(dtype=np.float64)
+    if not bool(np.isfinite(floats).all()):
+        raise ValueError(f"{label} 存在非有限数值，不能转为无符号整数")
+    if bool((floats < 0).any()):
+        raise ValueError(f"{label} 存在负数，不能转为无符号整数")
+    if bool((floats != np.floor(floats)).any()):
+        raise ValueError(f"{label} 存在小数，不能转为无符号整数")
+    if bool((floats >= 2.0**64).any()):
+        raise ValueError(f"{label} 超出uint64范围")
+    return pd.Series(floats.astype(np.uint64), index=numeric.index, name=numeric.name)
 
 
 def discover_dataset_dates(root: Path, dataset: str) -> set[int]:
