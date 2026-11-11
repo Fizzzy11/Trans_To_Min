@@ -19,6 +19,7 @@ from .adapter import L2InputAdapter, input_path, validate_matching_date_sets
 from .config import RunConfig
 from .provenance import source_contract, validate_resume
 from .group import MinuteMetricGroup
+from .universe import symbol_universe_scope
 from .resources import (
     process_peak_memory_bytes,
     recommend_adaptive_date_workers,
@@ -132,39 +133,41 @@ def _process_one_group_day(
     }
     requested = set(metric_names)
     outputs: dict[str, dict] = {}
-    for metric, frame in group.iter_compute_day(trade_date, inputs, metric_names):
-        if metric.name not in requested:
-            raise RuntimeError(
-                f"指标组{group.name!r}产生了未选择的指标：{metric.name}"
+    # 读入后、交给业务前登记输入：组内各指标复用同一张输入表的股票全集，只真正计算一次。
+    with symbol_universe_scope(inputs):
+        for metric, frame in group.iter_compute_day(trade_date, inputs, metric_names):
+            if metric.name not in requested:
+                raise RuntimeError(
+                    f"指标组{group.name!r}产生了未选择的指标：{metric.name}"
+                )
+            if metric.name in outputs:
+                raise RuntimeError(
+                    f"指标组{group.name!r}重复产生指标：{metric.name}"
+                )
+            path = (
+                staging_root
+                / trade_date.strftime("%Y%m")
+                / metric.name
+                / f"{trade_date:%Y%m%d}.parquet"
             )
-        if metric.name in outputs:
-            raise RuntimeError(
-                f"指标组{group.name!r}重复产生指标：{metric.name}"
+            if source_contract(
+                metric, trade_date, config.input_root, group=group
+            ) != contracts[metric.name]:
+                raise RuntimeError("组计算期间来源或算法发生变化，拒绝发布")
+            frame.attrs["source_contracts"] = {
+                trade_date.isoformat(): contracts[metric.name]
+            }
+            output = write_day_frame(
+                frame,
+                path,
+                metric.name,
+                metric.value_type,
+                config,
             )
-        path = (
-            staging_root
-            / trade_date.strftime("%Y%m")
-            / metric.name
-            / f"{trade_date:%Y%m%d}.parquet"
-        )
-        if source_contract(
-            metric, trade_date, config.input_root, group=group
-        ) != contracts[metric.name]:
-            raise RuntimeError("组计算期间来源或算法发生变化，拒绝发布")
-        frame.attrs["source_contracts"] = {
-            trade_date.isoformat(): contracts[metric.name]
-        }
-        output = write_day_frame(
-            frame,
-            path,
-            metric.name,
-            metric.value_type,
-            config,
-        )
-        output["source_contract"] = contracts[metric.name]
-        output["price_quality"] = frame.attrs.get("price_quality", {})
-        output["symbols"] = int(frame["symbol"].nunique()) if not frame.empty else 0
-        outputs[metric.name] = output
+            output["source_contract"] = contracts[metric.name]
+            output["price_quality"] = frame.attrs.get("price_quality", {})
+            output["symbols"] = int(frame["symbol"].nunique()) if not frame.empty else 0
+            outputs[metric.name] = output
     missing = sorted(requested - set(outputs))
     if missing:
         raise RuntimeError(f"指标组{group.name!r}没有产生所选指标：{missing}")

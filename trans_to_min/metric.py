@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 
 from .config import DATASETS, MINUTE_COUNT, validate_metric_name
+from .universe import frame_symbols
 from .minute import (
     assign_minute_codes,
     assign_timestamp_minute_codes,
@@ -110,15 +111,14 @@ class MinuteMetric(ABC):
         return self._align_minutes(trade_date, symbols, aggregated)
 
     def symbol_union(self, inputs: dict[str, pd.DataFrame]) -> list[str]:
-        """取本指标声明的所有逐笔输入中实际出现股票的并集。"""
+        """取本指标声明的所有逐笔输入中实际出现股票的并集。
+
+        执行器单日作用域内，同一张输入表的股票集合只真正计算一次，组内其他指标复用。
+        """
 
         symbols: set[str] = set()
         for dataset in self.inputs:
-            frame = inputs[dataset]
-            if "symbol" not in frame:
-                raise ValueError(f"{dataset} 缺少symbol字段")
-            unique = frame["symbol"].dropna().unique().tolist()
-            symbols.update(str(value) for value in unique)
+            symbols.update(frame_symbols(inputs[dataset], dataset))
         return sorted(symbols)
 
     def finalize_aggregated_day(
@@ -133,21 +133,28 @@ class MinuteMetric(ABC):
         该公开方法供同源指标组复用共享聚合结果。普通指标仍直接使用
         ``compute_day``，无需调用本方法。
 
-        ``symbols``可选：指标组已对同一份inputs算好股票全集时传入，避免每个指标
-        各扫描一次整张逐笔表。传入值必须等于``symbol_union(inputs)``，即本指标
-        声明的全部输入中实际出现的非空symbol（先于时间及方向筛选）；不传时行为不变。
+        1.2.4起框架在执行器单日作用域内自动只求一次股票全集，业务不需要也不建议
+        自行计算。``symbols``为兼容1.2.3保留：传入时必须等于``symbol_union(inputs)``，
+        即本指标声明的全部输入中实际出现的非空symbol（先于时间及方向筛选），否则报错。
         """
 
         missing = sorted(set(self.inputs) - set(inputs))
         if missing:
             raise ValueError(f"缺少指标输入：{missing}")
-        if symbols is None:
-            symbols = self.symbol_union(inputs)
-        else:
+        expected = self.symbol_union(inputs)
+        if symbols is not None:
             values = list(symbols)
             if any(value is None or pd.isna(value) for value in values):
                 raise ValueError("symbols不能包含空值")
-            symbols = sorted({str(value) for value in values})
+            provided = sorted({str(value) for value in values})
+            if provided != expected:
+                absent = sorted(set(expected) - set(provided))[:10]
+                extra = sorted(set(provided) - set(expected))[:10]
+                raise ValueError(
+                    "symbols必须等于symbol_union(inputs)："
+                    f"缺少示例{absent}，多出示例{extra}"
+                )
+        symbols = expected
         if not symbols:
             return self._empty_output()
         self._validate_aggregated(aggregated)

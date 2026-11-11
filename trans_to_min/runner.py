@@ -17,6 +17,7 @@ from .adapter import L2InputAdapter, input_path, validate_matching_date_sets
 from .config import RunConfig
 from .provenance import source_contract, validate_resume
 from .metric import MinuteMetric
+from .universe import symbol_universe_scope
 from .resources import (
     process_peak_memory_bytes,
     recommend_adaptive_date_workers,
@@ -130,7 +131,8 @@ def _process_one_day(
         dataset: adapter.read(dataset, trade_date, metric.input_columns[dataset])
         for dataset in metric.inputs
     }
-    result = metric.compute_day(trade_date, inputs)
+    with symbol_universe_scope(inputs):
+        result = metric.compute_day(trade_date, inputs)
     if source_contract(metric, trade_date, config.input_root) != contract:
         raise RuntimeError("计算期间来源或算法发生变化，拒绝发布")
     result.attrs["source_contracts"] = {trade_date.isoformat(): contract}
