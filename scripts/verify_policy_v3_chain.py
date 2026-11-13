@@ -324,7 +324,6 @@ def main():
     sys.path.insert(0, str(business_project))
     import minute_metrics as business
     from trans_to_min import MinuteMetricGroup, MinuteMetricGroupRunner, RunConfig
-    from trans_to_min.provenance import read_contracts
     from trans_to_min.storage import month_path
 
     if args.theme == "maxdiv_min":
@@ -365,11 +364,9 @@ def main():
                 table = pq.read_table(path, filters=[("trade_date", "==", day)])
                 checks = validate_day_output(table, day, VERIFY_SYMBOLS, metric.name,
                                              metric.value_type, expected, metric.empty_value)
-                if day.isoformat() not in read_contracts(path):
-                    raise ValueError(f"分钟输出缺少该日来源凭证：{day} {metric.name}")
                 report["results"].append({"metric": metric.name, "date": day.isoformat(), **checks,
                                           "price_quality": price_quality, "independent_reference": "passed"})
-        # 来源未变化时只能按契约跳过，不能仅凭文件存在认定已完成。
+        # 1.4.0起不保存来源凭证：已发布日期在resume时应全部跳过。
         resumed = MinuteMetricGroupRunner(group, RunConfig(
             input_root=input_root, output_root=output_root, date_workers=2,
             publish_while_computing=False, resume=True), roots).run(VERIFY_DATES)

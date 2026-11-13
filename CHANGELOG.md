@@ -1,7 +1,48 @@
 # 版本变更记录
 
-本项目采用语义化版本号。当前稳定版本为`1.2.4`，`1.0.0`是后续业务项目依赖和
+本项目采用语义化版本号。当前稳定版本为`1.4.0`，`1.0.0`是后续业务项目依赖和
 生产结果追溯的基础版本。
+
+## 1.4.0（2026-11-13）
+
+- 取消来源凭证（哈希）机制：月文件footer不再写`source_contracts`，manifest逐日条目不再写
+  `source_contract`，不再保存、读取或比对已发布结果的来源／代码哈希凭证。已发布数据由维护者自行管理。
+- 临时独立参考检查点仍绑定来源身份与参考代码摘要，失效时重扫参考；不作为历史结果的resume门禁。
+- `resume=True`的判断只剩一条：月文件里已有该日期就跳过。框架、业务代码、参数或来源文件
+  事后变化都不拦截；需要重建时用`overwrite_dates`显式重算。
+- 旧月文件footer里遗留的凭证不读不比，该月下次被重写（追加或重算日期）时自然消失。
+- `validate_published`不比对凭证，只做结构检查与逐值比对；指标声明了
+  `required_price_policy_version`时，校验前对所校验日期执行同一报价版本门禁，来源版本不符
+  即判失败。
+- `scripts/verify_policy_v3_chain.py`同步移除对已删除接口`read_contracts`的调用。
+- 删除`provenance.read_contracts`、`validate_resume`；`source_contract`保留，只在一次运行内
+  计算前后各取一次，发现来源文件中途被替换即拒绝发布（“计算期间来源文件发生变化，拒绝
+  发布”），并执行`required_price_policy_version`检查，结果不落盘。
+- 分钟轴、公式、输出层级、四列Schema及发布逻辑不变，已发布数据无需任何处理。详见
+  [1.4.0发布说明](docs/发布说明_1.4.0.md)。
+
+## 1.3.0（2026-11-12）
+
+- 新增`trans_to_min.source_stage`：逐笔日文件按文件身份（设备、inode、大小、mtime、ctime）在
+  内存盘暂存根目录只保留一份副本，执行器日期进程统一经`acquire`取得句柄后解码；同一任务的
+  生成与独立参考、读取同一张表的不同任务自动共用，机械盘上每个源文件只顺序读取一次。
+  引用计数由内核`flock`承担，进程被kill不留计数；机械盘读取按设备排它锁串行化；抄入暂存用`O_DIRECT`大块读（不支持时退回普通读）；超出预算先
+  淘汰无人持有的旧副本，再退回进程私有内存副本。
+- `RunConfig`新增`source_stage`、`source_stage_root`、`source_stage_budget_gb`、
+  `source_stage_retain`；`source_stage="off"`恢复直接读盘。
+- 执行器父进程新增`Prestager`按日期顺序预读；`L2InputAdapter.read`新增可选`source`参数。
+- 新增`trans_to_min.reference_check`：`DayReference`、生成期独立参考检查点
+  （`<输出根>/.reference_checkpoints/`）、`validate_published`对已发布月文件逐值比对；
+  检查点绑定源文件身份、参考代码sha256与指标类型，缺失或失效自动重扫，通过后删除。
+- 两个执行器与`run_task_cli`新增可选`reference`参数；`source_contract`页脚按文件身份缓存。
+- 调度器接口`stage_files`/`release`/`sweep`/`clear`。
+- 新增`tests/test_source_sharing.py`；同步README、统一契约、AGENTS、开发必读与
+  [1.3.0发布说明](docs/发布说明_1.3.0.md)。分钟轴、公式、输出层级、四列Schema及发布逻辑不变；
+  框架源码参与来源契约，1.2.4输出不能直接resume为1.3.0。
+- 发布前交叉评审修订（版本号不变）：句柄复核在Windows上不再比较ctime（按路径stat与按句柄
+  fstat的ctime含义不同，会把正常读取误报为文件变化）；独立参考可用`numpy.ma.MaskedArray`
+  声明期望NULL位置，掩码随检查点保存并参与比对（此前掩码被静默丢弃）；
+  `validate_published`的指标选择为空时判失败并保留检查点（此前判通过并删除检查点）。
 
 ## 1.2.4（2026-11-11）
 

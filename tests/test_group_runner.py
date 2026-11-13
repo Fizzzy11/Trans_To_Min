@@ -197,8 +197,8 @@ class MetricGroupTest(unittest.TestCase):
             )
             original_read = L2InputAdapter.read
 
-            def counting_read(adapter, dataset, trade_date, columns):
-                return original_read(adapter, dataset, trade_date, columns)
+            def counting_read(adapter, dataset, trade_date, columns, source=None):
+                return original_read(adapter, dataset, trade_date, columns, source=source)
 
             with patch.object(
                 L2InputAdapter,

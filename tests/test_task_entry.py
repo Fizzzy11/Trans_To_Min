@@ -176,7 +176,8 @@ class TaskEntryTest(unittest.TestCase):
         self.assertEqual([call[2] for call in self.hooks.validation_calls], [[day], [day]])
         self.assertEqual(path.read_bytes(), original)
 
-    def test_resume_rejects_changed_source_without_overwriting_output(self):
+    def test_resume_trusts_existing_date_after_source_change(self):
+        """已发布日期默认可信：来源事后被替换也不拦截、不重算，输出原样保留。"""
         day = date(2025, 1, 2)
         _write_trade(self.input_root, day)
         self.assertEqual(self._invoke("full", [day])[0], 0)
@@ -184,10 +185,9 @@ class TaskEntryTest(unittest.TestCase):
         original = path.read_bytes()
         _write_trade(self.input_root, day, 100)
         code, report = self._invoke("daily", [day])
-        self.assertEqual((code, report["status"]), (1, "failed"))
-        self.assertTrue(report["error"])
+        self.assertEqual((code, report["status"]), (0, "complete"))
+        self.assertEqual(report["generation"]["skipped_dates"], [day.isoformat()])
         self.assertEqual(path.read_bytes(), original)
-        self.assertEqual(len(self.hooks.validation_calls), 1)
 
     def test_validation_failure_can_be_retried_after_successful_generation(self):
         day = date(2025, 1, 2)

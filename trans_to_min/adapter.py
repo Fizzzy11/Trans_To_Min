@@ -39,17 +39,22 @@ class L2InputAdapter:
         dataset: str,
         trade_date: int | date | str,
         columns: Sequence[str],
+        source=None,
     ) -> pd.DataFrame:
-        """按列读取并归一化一个交易日的逐笔数据。"""
+        """按列读取并归一化一个交易日的逐笔数据。
+
+        ``source`` 为执行器取得的来源句柄（见 ``source_stage``）；提供时从句柄的
+        内存字节解码，不再访问磁盘上的源文件。
+        """
 
         path = input_path(self.input_root, dataset, trade_date)
-        if not path.is_file():
+        if source is None and not path.is_file():
             raise FileNotFoundError(f"逐笔文件不存在：{path}")
         requested = tuple(dict.fromkeys(columns))
         if not requested:
             raise ValueError("columns 不能为空")
 
-        parquet = pq.ParquetFile(path)
+        parquet = pq.ParquetFile(path if source is None else source.open())
         physical = self._physical_columns(dataset, requested, parquet.schema_arrow)
         metadata = parquet.schema_arrow.metadata or {}
         table = parquet.read(columns=physical, use_threads=True)

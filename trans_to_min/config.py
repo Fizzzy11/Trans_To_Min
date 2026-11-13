@@ -44,6 +44,12 @@ class RunConfig:
     publish_while_computing: bool = True
     overwrite_dates: bool = False
     resume: bool = False
+    # 源文件单次读取：auto为内存盘共享暂存（不可用时退回进程内缓冲），off为直接读盘。
+    source_stage: str = "auto"
+    source_stage_root: str | None = None
+    source_stage_budget_gb: float = 48.0
+    # False：最后一个使用者释放即删除副本；True：留给读取同一张表的其他任务，由调度器收尾清理。
+    source_stage_retain: bool = False
 
     def __post_init__(self) -> None:
         if self.date_workers < 0:
@@ -65,5 +71,11 @@ class RunConfig:
             raise ValueError("auto_worker_memory_multiplier不能小于1")
         if self.adaptive_memory_safety_factor < 1:
             raise ValueError("adaptive_memory_safety_factor不能小于1")
+        if self.source_stage not in ("auto", "off"):
+            raise ValueError("source_stage只支持auto或off")
+        if self.source_stage_root is not None and not isinstance(self.source_stage_root, str):
+            raise ValueError("source_stage_root必须为字符串路径或None")
+        if self.source_stage_budget_gb <= 0:
+            raise ValueError("source_stage_budget_gb必须为正数")
         if self.overwrite_dates and self.resume:
             raise ValueError("overwrite_dates和resume不能同时启用")

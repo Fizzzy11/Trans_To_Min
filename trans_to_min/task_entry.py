@@ -16,7 +16,7 @@ import uuid
 from ._version import __version__
 from .config import RunConfig
 from .metric import MinuteMetric
-from .provenance import source_contract, validate_resume
+from .provenance import source_contract
 from .runner import MinuteConversionRunner
 from .storage import metric_root, month_path
 
@@ -130,8 +130,6 @@ def _validation_identity(metric: MinuteMetric, config: RunConfig, dates: list[da
     outputs = {}
     for month in months:
         path = month_path(config.output_root, metric.name, month)
-        requested = [day for day in dates if day.strftime("%Y%m") == month]
-        validate_resume(path, metric, requested, config.input_root)
         stat = path.stat()
         outputs[month] = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
     return {
@@ -159,12 +157,16 @@ def run_task_cli(
     check_ready: Callable | None = None,
     validate_output: Callable | None = None,
     argv: Sequence[str] | None = None,
+    reference=None,
 ) -> int:
     """执行统一单指标入口，返回可由主脚本SystemExit使用的退出码。
 
     两个业务钩子均接收(metric, config, dates)。就绪检查未通过应抛InputsNotReady；
     校验须返回包含status、dates、level的JSON对象。此入口不实现日历、定时器、总
     调度器或交错校验，也不改变公式、分钟轴和按月保存格式。
+
+    ``reference`` 为可选的 ``DayReference``：提供后日期进程用同一份源字节顺带算出
+    独立参考检查点，校验钩子可调用 ``reference_check.validate_published`` 直接比对。
     """
     try:
         args = _parser().parse_args(argv)
@@ -213,7 +215,7 @@ def run_task_cli(
             with redirect_stdout(sys.stderr), _task_lock(root, payload["invocation_id"]):
                 if check_ready(metric, config, list(dates)) is not None:
                     raise ValueError("就绪检查成功须正常返回None；未就绪须抛InputsNotReady")
-                payload["generation"] = MinuteConversionRunner(metric, config).run(dates)
+                payload["generation"] = MinuteConversionRunner(metric, config, reference).run(dates)
                 _save_report(path, payload)
                 before = _validation_identity(metric, config, dates)
                 validation = validate_output(metric, config, list(dates))

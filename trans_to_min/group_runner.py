@@ -17,8 +17,10 @@ from pathlib import Path
 from ._version import __version__
 from .adapter import L2InputAdapter, input_path, validate_matching_date_sets
 from .config import RunConfig
-from .provenance import source_contract, validate_resume
+from .provenance import source_contract
 from .group import MinuteMetricGroup
+from .reference_check import ORIGIN_GENERATION, DayReference, compute_day_reference
+from .source_stage import Prestager, acquire, config_options
 from .universe import symbol_universe_scope
 from .resources import (
     process_peak_memory_bytes,
@@ -116,21 +118,54 @@ def _process_one_group_day(
     metric_names: tuple[str, ...],
     config: RunConfig,
     staging_root: Path,
+    reference: DayReference | None = None,
 ) -> dict:
-    """单日一次读取组内物理输入，并分别写入所选指标临时分片。"""
+    """单日一次读取组内物理输入，并分别写入所选指标临时分片。
+
+    每张来源表只取得一次字节（共享暂存或进程内缓冲）；独立参考与生产解码先后
+    使用同一份字节，参考结果写成检查点供校验阶段直接比对。
+    """
 
     started = time.perf_counter()
-    contracts = {
-        name: source_contract(
-            group.metric(name), trade_date, config.input_root, group=group
-        )
-        for name in metric_names
-    }
-    adapter = L2InputAdapter(config.input_root)
-    inputs = {
-        dataset: adapter.read(dataset, trade_date, group.input_columns[dataset])
-        for dataset in group.inputs
-    }
+    sources = {}
+    reference_summary = None
+    try:
+        for dataset in group.inputs:
+            sources[dataset] = acquire(
+                input_path(Path(config.input_root), dataset, trade_date),
+                **config_options(config),
+            )
+        contracts = {
+            name: source_contract(
+                group.metric(name), trade_date, config.input_root, group=group
+            )
+            for name in metric_names
+        }
+        # 契约按磁盘当前stat计算；确认它描述的正是句柄里的这份字节。
+        for handle in sources.values():
+            handle.verify_current()
+        if reference is not None:
+            # 参考先于生产解码运行并立即释放，两者的内存峰值不叠加。
+            reference_summary = compute_day_reference(
+                reference,
+                group.name,
+                {metric.name: metric.value_type for metric in group.metrics},
+                trade_date,
+                sources,
+                config,
+                origin=ORIGIN_GENERATION,
+            )
+        adapter = L2InputAdapter(config.input_root)
+        inputs = {
+            dataset: adapter.read(
+                dataset, trade_date, group.input_columns[dataset], source=sources[dataset]
+            )
+            for dataset in group.inputs
+        }
+        source_info = {dataset: handle.info() for dataset, handle in sources.items()}
+    finally:
+        for handle in sources.values():
+            handle.close()
     requested = set(metric_names)
     outputs: dict[str, dict] = {}
     # 读入后、交给业务前登记输入：组内各指标复用同一张输入表的股票全集，只真正计算一次。
@@ -153,10 +188,7 @@ def _process_one_group_day(
             if source_contract(
                 metric, trade_date, config.input_root, group=group
             ) != contracts[metric.name]:
-                raise RuntimeError("组计算期间来源或算法发生变化，拒绝发布")
-            frame.attrs["source_contracts"] = {
-                trade_date.isoformat(): contracts[metric.name]
-            }
+                raise RuntimeError("组计算期间来源文件发生变化，拒绝发布")
             output = write_day_frame(
                 frame,
                 path,
@@ -164,7 +196,6 @@ def _process_one_group_day(
                 metric.value_type,
                 config,
             )
-            output["source_contract"] = contracts[metric.name]
             output["price_quality"] = frame.attrs.get("price_quality", {})
             output["symbols"] = int(frame["symbol"].nunique()) if not frame.empty else 0
             outputs[metric.name] = output
@@ -174,6 +205,8 @@ def _process_one_group_day(
     return {
         "date": trade_date.isoformat(),
         "metrics": outputs,
+        "sources": source_info,
+        "reference": reference_summary,
         "elapsed_seconds": round(time.perf_counter() - started, 3),
         "peak_rss_bytes": process_peak_memory_bytes(),
     }
@@ -187,9 +220,11 @@ class MinuteMetricGroupRunner:
         group: MinuteMetricGroup,
         config: RunConfig,
         output_roots: Mapping[str, Path] | None = None,
+        reference: DayReference | None = None,
     ) -> None:
         self.group = group
         self.config = config
+        self.reference = reference
         roots = (
             {name: Path(config.output_root) for name in group.metric_names}
             if output_roots is None
@@ -324,6 +359,11 @@ class MinuteMetricGroupRunner:
                     computed_dates += len(month_dates)
                     payload["progress"]["computed_dates"] = computed_dates
                     for item in day_results:
+                        payload["day_sources"][item["date"]] = {
+                            "sources": item["sources"],
+                            "reference": item["reference"],
+                            "elapsed_seconds": item["elapsed_seconds"],
+                        }
                         for metric_name, output in item["metrics"].items():
                             payload["metrics"][metric_name]["days"][item["date"]] = {
                                 key: value
@@ -429,39 +469,60 @@ class MinuteMetricGroupRunner:
         *,
         date_workers: int,
     ) -> list[dict]:
-        if date_workers == 1 or len(dates) == 1:
-            _configure_worker(self.config.arrow_threads_per_worker)
-            return [
-                _process_one_group_day(
-                    self.group,
-                    value,
-                    pending_by_date[value],
-                    self.config,
-                    staging,
-                )
-                for value in dates
-            ]
-
+        serial = date_workers == 1 or len(dates) == 1
+        workers = 1 if serial else min(date_workers, len(dates))
+        items = [
+            (
+                value,
+                [
+                    input_path(Path(self.config.input_root), dataset, value)
+                    for dataset in self.group.inputs
+                ],
+            )
+            for value in dates
+        ]
         results = []
-        with ProcessPoolExecutor(
-            max_workers=min(date_workers, len(dates)),
-            initializer=_configure_worker,
-            initargs=(self.config.arrow_threads_per_worker,),
-            mp_context=_worker_process_context(),
-        ) as executor:
-            futures = {
-                executor.submit(
-                    _process_one_group_day,
-                    self.group,
-                    value,
-                    pending_by_date[value],
-                    self.config,
-                    staging,
-                ): value
-                for value in dates
-            }
-            for future in as_completed(futures):
-                results.append(future.result())
+        # 预读线程按日期顺序把来源放进共享暂存；日期进程计算时磁盘不空转。
+        with Prestager(items, config_options(self.config), window=workers + 2) as prestager:
+            if serial:
+                _configure_worker(self.config.arrow_threads_per_worker)
+                for value in dates:
+                    try:
+                        results.append(
+                            _process_one_group_day(
+                                self.group,
+                                value,
+                                pending_by_date[value],
+                                self.config,
+                                staging,
+                                self.reference,
+                            )
+                        )
+                    finally:
+                        prestager.done(value)
+                return results
+
+            with ProcessPoolExecutor(
+                max_workers=workers,
+                initializer=_configure_worker,
+                initargs=(self.config.arrow_threads_per_worker,),
+                mp_context=_worker_process_context(),
+            ) as executor:
+                futures = {
+                    executor.submit(
+                        _process_one_group_day,
+                        self.group,
+                        value,
+                        pending_by_date[value],
+                        self.config,
+                        staging,
+                        self.reference,
+                    ): value
+                    for value in dates
+                }
+                for future in as_completed(futures):
+                    prestager.done(futures[future])
+                    results.append(future.result())
         return sorted(results, key=lambda item: item["date"])
 
     def _month_publish_arguments(
@@ -527,16 +588,6 @@ class MinuteMetricGroupRunner:
                     )
                     & requested
                 )
-        if self.config.resume:
-            for name in self.group.metric_names:
-                for month, requested in grouped.items():
-                    validate_resume(
-                        month_path(self.output_roots[name], name, month),
-                        self.group.metric(name),
-                        requested & result[name],
-                        self.config.input_root,
-                        group=self.group,
-                    )
         return result
 
     def _validate_input_files(self, dates: list[date]) -> None:
@@ -608,6 +659,7 @@ class MinuteMetricGroupRunner:
                 "computed_dates": 0,
                 "completed_outputs": 0,
             },
+            "day_sources": {},
             "metrics": metrics,
         }
 

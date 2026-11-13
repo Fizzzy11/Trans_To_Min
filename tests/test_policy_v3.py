@@ -20,7 +20,7 @@ from trans_to_min import (
 )
 from trans_to_min.minute import minute_labels
 from trans_to_min.storage import month_path
-from trans_to_min.provenance import read_contracts, source_contract
+from trans_to_min.provenance import source_contract
 
 DAY = date(2025, 1, 9)
 
@@ -109,29 +109,46 @@ def test_all_unknown_group_remains_null_but_true_empty_minute_zero():
     assert result.loc[labels[3],"known_money_min"]==0
 
 
-def test_resume_requires_same_source_and_preserves_contract(tmp_path):
+CONTRACT_KEYS=(b"source_contracts",b"source_contract_current_dates")
+
+
+def test_output_stores_no_contract_and_resume_trusts_existing_dates(tmp_path):
+    """输出不保存任何来源凭证；已发布日期在resume时直接跳过，来源事后变化也不拦截。"""
     raw=tmp_path/"raw";out=tmp_path/"output";write_input(raw)
     config=RunConfig(input_root=raw,output_root=out,date_workers=1,publish_while_computing=False)
-    MinuteConversionRunner(AmountSum(),config).run([DAY])
+    result=MinuteConversionRunner(AmountSum(),config).run([DAY])
     path=month_path(out,"known_money_min","202501")
-    assert DAY.isoformat() in read_contracts(path)
+    metadata=pq.read_schema(path).metadata or {}
+    assert not any(key in metadata for key in CONTRACT_KEYS)
+    assert "source_contract" not in json.dumps(result,default=str)
     resume=RunConfig(input_root=raw,output_root=out,date_workers=1,publish_while_computing=False,resume=True)
     assert MinuteConversionRunner(AmountSum(),resume).run([DAY])["pending_dates"]==[]
-    write_input(raw,policy=b"2")
-    with pytest.raises(ValueError,match="不能resume"):
-        MinuteConversionRunner(AmountSum(),resume).run([DAY])
+    before=path.read_bytes()
+    write_input(raw,priced=200000)
+    assert MinuteConversionRunner(AmountSum(),resume).run([DAY])["pending_dates"]==[]
+    assert path.read_bytes()==before
 
 
-def test_old_output_without_contract_never_silently_skipped(tmp_path):
+def test_legacy_footer_contract_is_ignored_and_dropped_on_rewrite(tmp_path):
+    """旧月文件footer里遗留的凭证不读不比；同月追加新日期后随重写消失，旧日数值不变。"""
     raw=tmp_path/"raw";out=tmp_path/"output";write_input(raw)
+    next_day=date(2025,1,10);write_input(raw,day=next_day)
     config=RunConfig(input_root=raw,output_root=out,date_workers=1,publish_while_computing=False)
     MinuteConversionRunner(AmountSum(),config).run([DAY])
     path=month_path(out,"known_money_min","202501")
     table=pq.read_table(path)
-    metadata=dict(table.schema.metadata);metadata.pop(b"source_contracts")
+    metadata=dict(table.schema.metadata or {})
+    metadata[b"source_contracts"]=json.dumps({DAY.isoformat():"0"*64}).encode()
     pq.write_table(table.replace_schema_metadata(metadata),path)
-    with pytest.raises(ValueError,match="不能resume"):
-        MinuteConversionRunner(AmountSum(),RunConfig(input_root=raw,output_root=out,date_workers=1,resume=True)).run([DAY])
+    original=pq.read_table(path).to_pandas()
+    resume=RunConfig(input_root=raw,output_root=out,date_workers=1,publish_while_computing=False,resume=True)
+    assert MinuteConversionRunner(AmountSum(),resume).run([DAY])["pending_dates"]==[]
+    MinuteConversionRunner(AmountSum(),resume).run([DAY,next_day])
+    assert not any(key in (pq.read_schema(path).metadata or {}) for key in CONTRACT_KEYS)
+    frame=pq.read_table(path).to_pandas()
+    pd.testing.assert_frame_equal(
+        original,frame.loc[frame["trade_date"].eq(DAY)].reset_index(drop=True))
+    assert len(frame)==484
 
 
 def test_required_policy_blocks_old_input_before_computation(tmp_path):
@@ -144,15 +161,16 @@ def test_required_policy_blocks_old_input_before_computation(tmp_path):
     assert not (tmp_path/"output"/"known_money_min"/"2025"/"202501.parquet").exists()
 
 
-def test_algorithm_change_blocks_resume(tmp_path):
+def test_algorithm_change_does_not_block_resume(tmp_path):
+    """口径变更由维护者显式重建，不由resume拦截。"""
     raw = tmp_path / "raw"
     out = tmp_path / "output"
     write_input(raw)
     MinuteConversionRunner(AmountSum(), RunConfig(input_root=raw,output_root=out,date_workers=1)).run([DAY])
     changed = AmountSum()
     changed.algorithm_version = "changed"
-    with pytest.raises(ValueError, match="不能resume"):
-        MinuteConversionRunner(changed, RunConfig(input_root=raw,output_root=out,date_workers=1,resume=True)).run([DAY])
+    resumed = MinuteConversionRunner(changed, RunConfig(input_root=raw,output_root=out,date_workers=1,resume=True)).run([DAY])
+    assert resumed["pending_dates"] == []
 
 
 def test_explicit_null_integer_and_true_empty_zero_do_not_mix():
@@ -175,7 +193,7 @@ def test_quality_has_missing_volume_and_mixed_orders():
 
 
 def _config(raw, out, **changes):
-    """关闭发布重叠，使故障注入和逐日契约检查可确定复现。"""
+    """关闭发布重叠，使故障注入可确定复现。"""
     return RunConfig(
         input_root=raw,
         output_root=out,
@@ -185,8 +203,8 @@ def _config(raw, out, **changes):
     )
 
 
-def test_month_increment_retains_audited_day_contracts(tmp_path):
-    """同月新增日期保留旧日凭证，并允许整个新月份按同源恢复。"""
+def test_month_increment_keeps_old_day_and_resumes(tmp_path):
+    """同月新增日期不改旧日数值，整月可按已存在日期恢复。"""
     raw, out = tmp_path / "raw", tmp_path / "output"
     next_day = date(2025, 1, 10)
     write_input(raw)
@@ -194,20 +212,21 @@ def test_month_increment_retains_audited_day_contracts(tmp_path):
     metric = AmountSum()
     MinuteConversionRunner(metric, _config(raw, out)).run([DAY])
     path = month_path(out, metric.name, "202501")
-    original = read_contracts(path)
+    original = pq.read_table(path).to_pandas()
     MinuteConversionRunner(metric, _config(raw, out)).run([next_day])
-    updated = read_contracts(path)
-    assert updated[DAY.isoformat()] == original[DAY.isoformat()]
-    assert updated[next_day.isoformat()] == source_contract(metric, next_day, raw)
-    assert len(pq.read_table(path)) == 484
+    frame = pq.read_table(path).to_pandas()
+    assert len(frame) == 484
+    pd.testing.assert_frame_equal(
+        original, frame.loc[frame["trade_date"].eq(DAY)].reset_index(drop=True)
+    )
     resumed = MinuteConversionRunner(
         metric, _config(raw, out, resume=True)
     ).run([DAY, next_day])
     assert resumed["pending_dates"] == []
 
 
-def test_explicit_day_replacement_changes_only_that_contract(tmp_path):
-    """显式重建只替换目标日期的值和凭证，不冒充同月其他日期重算。"""
+def test_explicit_day_replacement_changes_only_that_day(tmp_path):
+    """显式重建只替换目标日期的值，同月其他日期原样保留。"""
     raw, out = tmp_path / "raw", tmp_path / "output"
     next_day = date(2025, 1, 10)
     write_input(raw)
@@ -215,15 +234,11 @@ def test_explicit_day_replacement_changes_only_that_contract(tmp_path):
     metric = AmountSum()
     MinuteConversionRunner(metric, _config(raw, out)).run([DAY, next_day])
     path = month_path(out, metric.name, "202501")
-    original_contracts = read_contracts(path)
     original_frame = pq.read_table(path).to_pandas()
     write_input(raw, priced=200000)
     MinuteConversionRunner(
         metric, _config(raw, out, overwrite_dates=True)
     ).run([DAY])
-    updated_contracts = read_contracts(path)
-    assert updated_contracts[DAY.isoformat()] != original_contracts[DAY.isoformat()]
-    assert updated_contracts[next_day.isoformat()] == original_contracts[next_day.isoformat()]
     frame = pq.read_table(path).to_pandas()
     pd.testing.assert_frame_equal(
         original_frame.loc[original_frame["trade_date"].eq(next_day)].reset_index(drop=True),
@@ -242,8 +257,8 @@ class SharedAmountGroup(MinuteMetricGroup):
         yield from super().iter_compute_day(trade_date, inputs, metric_names)
 
 
-def test_default_group_contract_matches_single_metric_and_resumes(tmp_path):
-    """默认组仅委派单指标计算，名字不同也不应改变数值契约。"""
+def test_default_group_resumes_single_metric_output(tmp_path):
+    """默认组仅委派单指标计算，可直接续跑单指标入口已发布的日期。"""
     raw, out = tmp_path / "raw", tmp_path / "output"
     write_input(raw)
     metric = AmountSum()
@@ -259,30 +274,22 @@ def test_default_group_contract_matches_single_metric_and_resumes(tmp_path):
     assert resumed["metrics"][metric.name]["progress"]["skipped"] == 1
 
 
-def test_custom_group_contract_is_not_silently_mixed_with_single(tmp_path):
-    """自定义组源码及组名参与凭证；同一自定义组可恢复，换入口须阻断。"""
+def test_custom_group_and_single_entry_resume_each_other(tmp_path):
+    """来源身份与组名、组源码无关；换入口也按已存在日期恢复。"""
     raw, out = tmp_path / "raw", tmp_path / "output"
     write_input(raw)
     metric = AmountSum()
     group = SharedAmountGroup("shared_amount_group", (metric,))
-    assert source_contract(metric, DAY, raw) != source_contract(
+    assert source_contract(metric, DAY, raw) == source_contract(
         metric, DAY, raw, group=group
-    )
-    assert source_contract(metric, DAY, raw, group=group) != source_contract(
-        metric, DAY, raw,
-        group=SharedAmountGroup("another_shared_group", (metric,)),
     )
     MinuteMetricGroupRunner(group, _config(raw, out)).run([DAY])
     assert MinuteMetricGroupRunner(
         group, _config(raw, out, resume=True)
     ).run([DAY])["metrics"][metric.name]["progress"]["pending"] == 0
-    with pytest.raises(ValueError, match="不能resume"):
-        MinuteConversionRunner(metric, _config(raw, out, resume=True)).run([DAY])
-    with pytest.raises(ValueError, match="不能resume"):
-        MinuteMetricGroupRunner(
-            MinuteMetricGroup("default_group", (metric,)),
-            _config(raw, out, resume=True),
-        ).run([DAY])
+    assert MinuteConversionRunner(
+        metric, _config(raw, out, resume=True)
+    ).run([DAY])["pending_dates"] == []
 
 
 @pytest.mark.parametrize("grouped", [False, True])
@@ -305,13 +312,13 @@ def test_source_change_during_compute_refuses_month_publication(tmp_path, groupe
             )
         else:
             runner = MinuteConversionRunner(AmountSum(), _config(raw, out))
-        with pytest.raises(RuntimeError, match="计算期间来源或算法发生变化"):
+        with pytest.raises(RuntimeError, match="计算期间来源文件发生变化"):
             runner.run([DAY])
     assert not month_path(out, "known_money_min", "202501").exists()
 
 
-def test_declared_business_parameters_participate_in_resume_contract(tmp_path):
-    """业务实例的显式参数变化也必须阻止旧结果被跳过。"""
+def test_declared_business_parameters_do_not_block_resume(tmp_path):
+    """业务参数变化不拦截resume；需要重建时由维护者显式执行。"""
     raw, out = tmp_path / "raw", tmp_path / "output"
     write_input(raw)
     metric = AmountSum()
@@ -319,8 +326,9 @@ def test_declared_business_parameters_participate_in_resume_contract(tmp_path):
     MinuteConversionRunner(metric, _config(raw, out)).run([DAY])
     changed = AmountSum()
     changed.contract_parameters = {"统计单位": "事件", "阈值": 2}
-    with pytest.raises(ValueError, match="不能resume"):
-        MinuteConversionRunner(changed, _config(raw, out, resume=True)).run([DAY])
+    assert MinuteConversionRunner(
+        changed, _config(raw, out, resume=True)
+    ).run([DAY])["pending_dates"] == []
 
 
 @pytest.mark.parametrize("use_timestamp", [False, True])

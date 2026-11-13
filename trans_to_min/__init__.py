@@ -7,6 +7,7 @@ from .config import RunConfig
 from .group import MinuteMetricGroup
 from .group_runner import MinuteMetricGroupRunner
 from .metric import MinuteMetric
+from .reference_check import DayReference, validate_published
 from .resources import ParallelismRecommendation, recommend_date_workers
 from .runner import MinuteConversionRunner
 
@@ -15,6 +16,7 @@ __all__ = [
     "trade_order_participation",
     "validate_amounts",
     "__version__",
+    "DayReference",
     "L2InputAdapter",
     "MinuteConversionRunner",
     "MinuteMetricGroup",
@@ -24,4 +26,5 @@ __all__ = [
     "RunConfig",
     "input_path",
     "recommend_date_workers",
+    "validate_published",
 ]

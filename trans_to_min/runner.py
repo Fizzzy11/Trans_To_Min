@@ -15,8 +15,10 @@ from pathlib import Path
 from ._version import __version__
 from .adapter import L2InputAdapter, input_path, validate_matching_date_sets
 from .config import RunConfig
-from .provenance import source_contract, validate_resume
+from .provenance import source_contract
 from .metric import MinuteMetric
+from .reference_check import ORIGIN_GENERATION, DayReference, compute_day_reference
+from .source_stage import Prestager, acquire, config_options
 from .universe import symbol_universe_scope
 from .resources import (
     process_peak_memory_bytes,
@@ -121,29 +123,59 @@ def _process_one_day(
     trade_date: date,
     config: RunConfig,
     staging_root: Path,
+    reference: DayReference | None = None,
 ) -> dict:
-    """子进程执行一个交易日的读取、计算和临时写入。"""
+    """子进程执行一个交易日的读取、计算和临时写入。
+
+    每张来源表只取得一次字节；独立参考（如有）与生产解码先后使用同一份字节。
+    """
 
     started = time.perf_counter()
-    contract = source_contract(metric, trade_date, config.input_root)
-    adapter = L2InputAdapter(config.input_root)
-    inputs = {
-        dataset: adapter.read(dataset, trade_date, metric.input_columns[dataset])
-        for dataset in metric.inputs
-    }
+    sources = {}
+    reference_summary = None
+    try:
+        for dataset in metric.inputs:
+            sources[dataset] = acquire(
+                input_path(Path(config.input_root), dataset, trade_date),
+                **config_options(config),
+            )
+        contract = source_contract(metric, trade_date, config.input_root)
+        for handle in sources.values():
+            handle.verify_current()
+        if reference is not None:
+            reference_summary = compute_day_reference(
+                reference,
+                metric.name,
+                {metric.name: metric.value_type},
+                trade_date,
+                sources,
+                config,
+                origin=ORIGIN_GENERATION,
+            )
+        adapter = L2InputAdapter(config.input_root)
+        inputs = {
+            dataset: adapter.read(
+                dataset, trade_date, metric.input_columns[dataset], source=sources[dataset]
+            )
+            for dataset in metric.inputs
+        }
+        source_info = {dataset: handle.info() for dataset, handle in sources.items()}
+    finally:
+        for handle in sources.values():
+            handle.close()
     with symbol_universe_scope(inputs):
         result = metric.compute_day(trade_date, inputs)
     if source_contract(metric, trade_date, config.input_root) != contract:
-        raise RuntimeError("计算期间来源或算法发生变化，拒绝发布")
-    result.attrs["source_contracts"] = {trade_date.isoformat(): contract}
+        raise RuntimeError("计算期间来源文件发生变化，拒绝发布")
     path = staging_root / trade_date.strftime("%Y%m") / f"{trade_date:%Y%m%d}.parquet"
     output = write_day_frame(result, path, metric.name, metric.value_type, config)
     output.update(
         {
-            "source_contract": contract,
             "price_quality": result.attrs.get("price_quality", {}),
             "date": trade_date.isoformat(),
             "symbols": int(result["symbol"].nunique()) if not result.empty else 0,
+            "sources": source_info,
+            "reference": reference_summary,
             "elapsed_seconds": round(time.perf_counter() - started, 3),
             "peak_rss_bytes": process_peak_memory_bytes(),
         }
@@ -154,9 +186,15 @@ def _process_one_day(
 class MinuteConversionRunner:
     """按日期并行计算、按月检查点发布单个分钟数据。"""
 
-    def __init__(self, metric: MinuteMetric, config: RunConfig) -> None:
+    def __init__(
+        self,
+        metric: MinuteMetric,
+        config: RunConfig,
+        reference: DayReference | None = None,
+    ) -> None:
         self.metric = metric
         self.config = config
+        self.reference = reference
 
     def discover_dates(
         self,
@@ -452,45 +490,64 @@ class MinuteConversionRunner:
     ) -> list[dict]:
         """计算一个月份；方法结束即销毁进程池并归还工作进程内存。"""
 
-        if date_workers == 1 or len(dates) == 1:
-            _configure_worker(self.config.arrow_threads_per_worker)
-            results = []
-            for index, value in enumerate(dates, start=1):
-                item = _process_one_day(self.metric, value, self.config, staging)
-                results.append(item)
-                self._log_day_progress(
-                    item,
-                    completed_offset + index,
-                    total_dates,
-                )
-            return results
-
+        serial = date_workers == 1 or len(dates) == 1
+        max_workers = 1 if serial else min(date_workers, len(dates))
+        items = [
+            (
+                value,
+                [
+                    input_path(Path(self.config.input_root), dataset, value)
+                    for dataset in self.metric.inputs
+                ],
+            )
+            for value in dates
+        ]
         results = []
-        max_workers = min(date_workers, len(dates))
-        with ProcessPoolExecutor(
-            max_workers=max_workers,
-            initializer=_configure_worker,
-            initargs=(self.config.arrow_threads_per_worker,),
-            mp_context=_worker_process_context(),
-        ) as executor:
-            futures = {
-                executor.submit(
-                    _process_one_day,
-                    self.metric,
-                    value,
-                    self.config,
-                    staging,
-                ): value
-                for value in dates
-            }
-            for index, future in enumerate(as_completed(futures), start=1):
-                item = future.result()
-                results.append(item)
-                self._log_day_progress(
-                    item,
-                    completed_offset + index,
-                    total_dates,
-                )
+        # 预读线程按日期顺序把来源放进共享暂存；日期进程计算时磁盘不空转。
+        with Prestager(items, config_options(self.config), window=max_workers + 2) as prestager:
+            if serial:
+                _configure_worker(self.config.arrow_threads_per_worker)
+                for index, value in enumerate(dates, start=1):
+                    try:
+                        item = _process_one_day(
+                            self.metric, value, self.config, staging, self.reference
+                        )
+                    finally:
+                        prestager.done(value)
+                    results.append(item)
+                    self._log_day_progress(
+                        item,
+                        completed_offset + index,
+                        total_dates,
+                    )
+                return results
+
+            with ProcessPoolExecutor(
+                max_workers=max_workers,
+                initializer=_configure_worker,
+                initargs=(self.config.arrow_threads_per_worker,),
+                mp_context=_worker_process_context(),
+            ) as executor:
+                futures = {
+                    executor.submit(
+                        _process_one_day,
+                        self.metric,
+                        value,
+                        self.config,
+                        staging,
+                        self.reference,
+                    ): value
+                    for value in dates
+                }
+                for index, future in enumerate(as_completed(futures), start=1):
+                    prestager.done(futures[future])
+                    item = future.result()
+                    results.append(item)
+                    self._log_day_progress(
+                        item,
+                        completed_offset + index,
+                        total_dates,
+                    )
         return sorted(results, key=lambda item: item["date"])
 
     def _finish_month_publish(
@@ -562,14 +619,6 @@ class MinuteConversionRunner:
                 )
                 & requested
             )
-        if self.config.resume:
-            for month, requested in grouped.items():
-                validate_resume(
-                    month_path(self.config.output_root, self.metric.name, month),
-                    self.metric,
-                    requested & existing,
-                    self.config.input_root,
-                )
         return existing
 
     def _validate_input_files(self, dates: list[date]) -> None:
