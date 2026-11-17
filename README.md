@@ -1,7 +1,13 @@
 # Trans_To_Min：逐笔数据转分钟数据框架
 
 > **使用本框架设计任何任务前，必须先完整阅读[逐笔转分钟业务开发必读](docs/逐笔转分钟业务开发必读.md)**
-> （数据事实、适配器边界、性能陷阱、精度与溢出、存量/日增量运行约束）。
+> （数据事实、适配器边界、性能陷阱、精度与溢出、存量/日增量运行约束），以及
+> [逐笔转分钟任务通用开发约定](docs/逐笔转分钟任务通用开发约定.md)（与具体指标无关的做法和
+> 交付前自查清单）。
+>
+> **2.0.0起新任务一律按[2.0.0发布说明](docs/发布说明_2.0.0.md)编写**：计算写在`BlockMetricGroup.compute_block`
+> （只用numpy与`trans_to_min.kernels`，不得用pandas），用`python -m trans_to_min run`启动；
+> 任务内不得自建调度、并行、暂存、清理或凭证管控，也不得复制、修改或给框架打补丁。
 
 ## 2026-11-10正常242分钟目标口径补充
 
@@ -28,8 +34,21 @@ acj_basic_min四个独立任务管理与存储。
 框架负责输入适配、分钟切片、股票与分钟补齐、并发调度、增量运行和按月发布；具体
 数据的研究含义和计算公式由独立业务项目实现。
 
-当前稳定版本为`1.4.0`。这是后续业务项目依赖、生产结果追溯和兼容性判断的当前
+当前稳定版本为`2.0.0`。这是后续业务项目依赖、生产结果追溯和兼容性判断的当前
 生产版本。版本变更见[CHANGELOG.md](CHANGELOG.md)。
+
+### 2.0.0：调度、分块并行与资源分配收进框架
+
+- 统一运行入口`python -m trans_to_min run <运行配置.toml>`：按"任务×月"派发，读同一张表的任务
+  对齐月份、共用暂存，`STOP`文件停止派发，内存不足只暂停派发，结束自动清理，只写一份运行报告。
+- 内存总预算为总内存×`memory_fraction`（默认且上限0.95，含暂存），每行字节数按实测校准；
+  分块线程数=CPU÷并发日期进程数（1~16）。
+- `BlockMetricGroup`按股票分块、线程并行；业务只写`compute_block`，用`trans_to_min.kernels`
+  的分段运算，所在模块不得导入pandas。
+- 校验默认`light`：全部日期做结构检查，加最多3个代表日的全股票独立复算。full模式启动前，
+  必须有达标的`bench`报告（每行字节数≤250）。
+- `scripts/audit_task.py`供验收方只读检查任务是否守约。适配器读数提速、分钟编码改为查表，结果不变。
+- 1.4.0接口与执行方式全部保留，旧任务不迁移。详见[2.0.0发布说明](docs/发布说明_2.0.0.md)。
 
 ### 1.4.0：取消来源凭证，已发布数据默认可信
 
@@ -174,7 +193,7 @@ raw生成框架1.2.0与分钟框架自1.1.0起通过同一份三表契约衔接�
 - 不自动读取股票池、上市状态、ST状态、停牌表或退市表；
 - 不为完全没有相关逐笔记录的股票凭空创建分钟行；
 - 不连接`cn_stock_1min`，也不把数据库校验写入生产转换流程；
-- 不负责数据库入库、任务调度、监控告警和集群级分布式计算；
+- 不负责数据库入库、定时触发、监控告警和集群级分布式计算；2.0.0已提供单机、多任务运行调度；
 - 不替业务选择事件或订单统计单位、主动方向筛选、时间可见性和具体公式；
 - 不实现新交易制度下独立的盘后半小时分钟轴；当前盘前和盘后处理遵循第6节的
   固定边界；
@@ -212,7 +231,10 @@ python -m pip install /app/workspace/zhangyuan/Trans_To_Min
 python -c "import trans_to_min; print(trans_to_min.__version__)"
 ```
 
-### 3.3 不安装直接使用
+### 3.3 旧接口兼容：不安装直接使用
+
+以下是旧任务保留的兼容方式。2.0.0新任务必须使用统一安装的框架，不得复制私有框架或修改
+`sys.path`绕开安装；完整运行调度器依赖Linux，Windows可使用旧接口及跨平台单元测试。
 
 直接复制也能运行，但必须满足以下一种条件：
 
@@ -499,7 +521,10 @@ manifest是运行审计信息，不替代业务指标README，也不是累计运
 每日增量使用“生成→发布→校验”的顺序，不为日更启动交错校验队列。1.2.0标准任务
 入口在全量模式下也采用保守的顺序校验；首次全量的交错校验仍需业务或外部编排实现。
 
-## 8. 定义单个分钟指标
+## 8. 旧接口兼容：定义单个分钟指标
+
+本节与第9、10节介绍保留的1.x接口，不是2.0.0新任务模板。新任务采用前文概述的
+`BlockMetricGroup`与统一运行入口，完整示例见[2.0.0发布说明](docs/发布说明_2.0.0.md)。
 
 指标类继承`MinuteMetric`并声明输入、字段、输出类型和空分钟语义：
 
@@ -600,10 +625,10 @@ cd /app/workspace/zhangyuan/Trans_To_Min
 
 ### 9.1 历史全量转每日增量标准入口（1.2.0）
 
-新任务先读[标准流程](docs/历史全量转每日增量标准流程.md)和
-[统一调度接入约定](docs/统一日更调度接入约定.md)。可复制
-`scripts/run_task_template.py`到业务任务的`scripts/`，接入同一个指标类、真实上游
-就绪检查和独立校验。全量结束后不复制或重写公式，日更只改变日期清单及资源参数。
+本节保留既有1.2.0入口的兼容说明，流程见[标准流程](docs/历史全量转每日增量标准流程.md)和
+[统一调度接入约定](docs/统一日更调度接入约定.md)。既有任务继续接入同一个指标类、真实上游
+就绪检查和独立校验；全量结束后不复制或重写公式。2.0.0新任务不得再复制脚本到任务的
+`scripts/`目录，应提供任务工厂及`run/*.toml`，使用`python -m trans_to_min run`。
 
 统一函数为`trans_to_min.task_entry.run_task_cli(metric, check_ready=...,
 validate_output=..., argv=...)`；具体签名、参数、状态和退出码见上述文档。模板默认
@@ -737,8 +762,9 @@ stat、Schema及footer，仅在本次运行内比较，不写入月文件或mani
 - 上月流式发布默认与下月日期计算重叠。
 
 这些优化只作用于读取、切片、补齐、调度和发布，不改变业务公式、股票集合、空值
-语义、分钟边界或输出Schema。业务公式自身的向量化、NumPy归约或其他计算引擎选型
-属于业务项目职责。
+语义、分钟边界或输出Schema。2.0.0起新任务的计算统一写在`BlockMetricGroup.compute_block`里，
+使用`trans_to_min.kernels`的分段运算，由框架按股票分块并行；不再由业务自选pandas等计算方式。
+调度、线程数与内存分配见[2.0.0发布说明](docs/发布说明_2.0.0.md)第3节。
 
 ## 14. 公开接口索引
 
@@ -759,6 +785,9 @@ stat、Schema及footer，仅在本次运行内比较，不写入月文件或mani
 | `validate_amounts` | 约定缺额与非空负额、Inf等非法金额校验 |
 | `ParallelismRecommendation` | 自动并发建议结果 |
 | `recommend_date_workers` | 根据资源与输入元数据建议日期进程数 |
+| `BlockMetricGroup`、`Block`、`CellValues` | 2.0.0按股票分块计算的指标组及其输入、结果 |
+| `kernels` | 2.0.0有序分段归约运算模块 |
+| `TaskGroup` | 2.0.0任务工厂返回的指标组、输出子目录与独立参考 |
 
 按模块使用的低层接口：
 
@@ -766,7 +795,9 @@ stat、Schema及footer，仅在本次运行内比较，不写入月文件或mani
 - `trans_to_min.task_entry`：`run_task_cli()`、`InputsNotReady`；
 - `trans_to_min.minute`：`minute_labels()`、`assign_minute_labels()`、
   `assign_minute_codes()`、`assign_timestamp_minute_codes()`、
-  `minute_labels_from_codes()`；
+  `minute_labels_from_codes()`、`minute_codes()`（2.0.0，numpy查表版）；
+- `trans_to_min.plan`：`load_plan()`、`load_task_groups()`；`trans_to_min.scheduler`：`run()`；
+  `trans_to_min.bench`：`run_bench()`、`check_report()`（均为2.0.0）；
 - `trans_to_min.resources`：`recommend_adaptive_date_workers()`、
   `process_peak_memory_bytes()`、`available_memory_bytes()`；
 - `trans_to_min.storage`：`output_schema()`、`metric_root()`、`month_path()`、

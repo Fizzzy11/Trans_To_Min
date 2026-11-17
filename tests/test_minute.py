@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 import unittest
 
@@ -141,3 +142,50 @@ class MinuteBoundaryTest(unittest.TestCase):
         )
         labels = assign_minute_labels(timestamps, "2025-01-02", include_post_market=True)
         self.assertEqual(labels.dt.strftime("%H:%M:%S").tolist(), ["15:00:00"] * 3)
+
+
+def _reference_minute_codes(values, include_pre_market, include_post_market):
+    """1.4.0的逐掩码实现，作为查表版minute_codes的对照。"""
+
+    from trans_to_min.minute import (
+        MILLISECONDS_PER_MINUTE as M, T0930, T1129, T1131, T1259, T1300, T1459, T1500)
+
+    codes = np.full(len(values), -1, dtype=np.int16)
+    if include_pre_market:
+        codes[values <= T0930] = 0
+    else:
+        codes[values == T0930] = 0
+    morning = (values > T0930) & (values <= T1129)
+    codes[morning] = ((values[morning] - T0930 + M - 1) // M).astype(np.int16)
+    codes[(values > T1129) & (values <= T1131)] = 120
+    codes[(values >= T1259) & (values <= T1300)] = 121
+    afternoon = (values > T1300) & (values <= T1459)
+    codes[afternoon] = (121 + (values[afternoon] - T1300 + M - 1) // M).astype(np.int16)
+    if include_post_market:
+        codes[values > T1459] = 241
+    else:
+        codes[(values > T1459) & (values <= T1500)] = 241
+    return codes
+
+
+class LookupMinuteCodesTest(unittest.TestCase):
+    def test_lookup_matches_reference_at_every_boundary(self) -> None:
+        """每个整分钟前后各2秒的全部毫秒及随机全日毫秒上，与逐掩码实现完全一致。"""
+
+        from trans_to_min.minute import minute_codes
+
+        edges = np.arange(0, 86_400_000 + 1, 60_000, dtype=np.int64)
+        near = (edges[:, None] + np.arange(-2000, 2001, dtype=np.int64)[None, :]).ravel()
+        random = np.random.default_rng(5).integers(0, 86_400_000, 2_000_000)
+        values = np.concatenate((near, random))
+        values = values[(values >= 0) & (values < 86_400_000)]
+        for pre in (False, True):
+            for post in (False, True):
+                np.testing.assert_array_equal(
+                    minute_codes(values, include_pre_market=pre, include_post_market=post),
+                    _reference_minute_codes(values, pre, post),
+                )
+        with self.assertRaises(ValueError):
+            minute_codes(np.array([86_400_000]))
+        with self.assertRaises(TypeError):
+            minute_codes(np.array([1.5]))

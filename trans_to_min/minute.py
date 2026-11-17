@@ -106,42 +106,69 @@ def assign_minute_codes(
     numeric = pd.to_numeric(time_ms, errors="raise")
     if numeric.isna().any():
         raise ValueError("time_ms不允许为空")
-    values = numeric.to_numpy(dtype=np.int64, copy=False)
-    invalid_range = (values < 0) | (values >= MILLISECONDS_PER_DAY)
-    if bool(invalid_range.any()):
-        examples = values[invalid_range][:5].tolist()
-        raise ValueError(f"time_ms超出单日毫秒范围：{examples}")
-
-    codes = np.full(len(values), -1, dtype=np.int16)
-    if include_pre_market:
-        codes[values <= T0930] = 0
-    else:
-        codes[values == T0930] = 0
-
-    regular_morning = (values > T0930) & (values <= T1129)
-    codes[regular_morning] = (
-        (values[regular_morning] - T0930 + MILLISECONDS_PER_MINUTE - 1)
-        // MILLISECONDS_PER_MINUTE
-    ).astype(np.int16)
-    codes[(values > T1129) & (values <= T1131)] = 120
-    codes[(values >= T1259) & (values <= T1300)] = 121
-
-    regular_afternoon = (values > T1300) & (values <= T1459)
-    codes[regular_afternoon] = (
-        121
-        + (
-            values[regular_afternoon]
-            - T1300
-            + MILLISECONDS_PER_MINUTE
-            - 1
-        )
-        // MILLISECONDS_PER_MINUTE
-    ).astype(np.int16)
-    if include_post_market:
-        codes[values > T1459] = 241
-    else:
-        codes[(values > T1459) & (values <= T1500)] = 241
+    codes = minute_codes(
+        numeric.to_numpy(dtype=np.int64, copy=False),
+        include_pre_market=include_pre_market,
+        include_post_market=include_post_market,
+    )
     return pd.Series(codes, index=time_ms.index, name="minute_code", copy=False)
+
+
+def _ceiling_minute_table(include_pre_market: bool, include_post_market: bool) -> np.ndarray:
+    """按"向上取整到分钟"的结束分钟（午夜起分钟数）查分钟编码；两个整点特例另行处理。"""
+
+    table = np.full(1441, -1, dtype=np.int16)
+    open_minute = T0930 // MILLISECONDS_PER_MINUTE
+    if include_pre_market:
+        table[: open_minute + 1] = 0
+    else:
+        table[open_minute] = 0
+    table[open_minute + 1 : open_minute + 120] = np.arange(1, 120, dtype=np.int16)
+    table[T1129 // MILLISECONDS_PER_MINUTE + 1 : T1131 // MILLISECONDS_PER_MINUTE + 1] = 120
+    table[T1259 // MILLISECONDS_PER_MINUTE : T1300 // MILLISECONDS_PER_MINUTE + 1] = 121
+    afternoon = T1300 // MILLISECONDS_PER_MINUTE
+    table[afternoon + 1 : afternoon + 121] = np.arange(122, 242, dtype=np.int16)
+    if include_post_market:
+        table[afternoon + 121 :] = 241
+    return table
+
+
+_CEILING_TABLES = {
+    (pre, post): _ceiling_minute_table(pre, post)
+    for pre in (False, True)
+    for post in (False, True)
+}
+
+
+def minute_codes(
+    values: np.ndarray,
+    *,
+    include_pre_market: bool = True,
+    include_post_market: bool = False,
+) -> np.ndarray:
+    """numpy版分钟编码：输入午夜以来毫秒数的整数数组，返回int16编码，轴外为-1。
+
+    规则与 :func:`assign_minute_codes` 完全相同，但只做"向上取整到分钟再查表"，
+    适合在分块线程内对大数组调用。
+    """
+
+    array = np.asarray(values)
+    if array.dtype.kind not in "iu":
+        raise TypeError(f"time_ms必须是整数数组，实际为{array.dtype}")
+    if len(array) and (int(array.min()) < 0 or int(array.max()) >= MILLISECONDS_PER_DAY):
+        invalid = (array < 0) | (array >= MILLISECONDS_PER_DAY)
+        raise ValueError(f"time_ms超出单日毫秒范围：{array[invalid][:5].tolist()}")
+    ceiling = (array.astype(np.int64) + (MILLISECONDS_PER_MINUTE - 1)) // MILLISECONDS_PER_MINUTE
+    codes = _CEILING_TABLES[(bool(include_pre_market), bool(include_post_market))][ceiling]
+    # 12:59整点归121，而(12:58, 12:59)不属于分钟轴；两者向上取整相同，需按原值区分。
+    noon = ceiling == T1259 // MILLISECONDS_PER_MINUTE
+    if noon.any():
+        codes[noon & (array != T1259)] = -1
+    if not include_pre_market:
+        opening = ceiling == T0930 // MILLISECONDS_PER_MINUTE
+        if opening.any():
+            codes[opening & (array != T0930)] = -1
+    return codes
 
 
 def minute_labels_from_codes(

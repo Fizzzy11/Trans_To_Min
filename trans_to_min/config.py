@@ -50,6 +50,9 @@ class RunConfig:
     source_stage_budget_gb: float = 48.0
     # False：最后一个使用者释放即删除副本；True：留给读取同一张表的其他任务，由调度器收尾清理。
     source_stage_retain: bool = False
+    # 分块指标组：每块最多行数（各表合计，一只股票不拆分）；块线程数0表示取arrow_threads_per_worker。
+    block_row_budget: int = 250_000
+    block_threads: int = 0
 
     def __post_init__(self) -> None:
         if self.date_workers < 0:
@@ -77,5 +80,9 @@ class RunConfig:
             raise ValueError("source_stage_root必须为字符串路径或None")
         if self.source_stage_budget_gb <= 0:
             raise ValueError("source_stage_budget_gb必须为正数")
+        if self.block_row_budget < 1:
+            raise ValueError("block_row_budget必须为正整数")
+        if self.block_threads < 0:
+            raise ValueError("block_threads不能为负数，0表示自动选择")
         if self.overwrite_dates and self.resume:
             raise ValueError("overwrite_dates和resume不能同时启用")

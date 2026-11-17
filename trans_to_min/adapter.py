@@ -55,6 +55,13 @@ class L2InputAdapter:
             raise ValueError("columns 不能为空")
 
         parquet = pq.ParquetFile(path if source is None else source.open())
+        if "symbol" in parquet.schema_arrow.names:
+            # symbol按字典直接解码为分类，避免先物化上亿个字符串对象；复用已解析的元数据。
+            parquet = pq.ParquetFile(
+                path if source is None else source.open(),
+                metadata=parquet.metadata,
+                read_dictionary=["symbol"],
+            )
         physical = self._physical_columns(dataset, requested, parquet.schema_arrow)
         metadata = parquet.schema_arrow.metadata or {}
         table = parquet.read(columns=physical, use_threads=True)
@@ -69,7 +76,8 @@ class L2InputAdapter:
             field.name for field in parquet.schema_arrow if pa.types.is_integer(field.type)
         }
         normalized = self._normalize(dataset, frame, requested, metadata, integer_columns)
-        return normalized.reindex(columns=requested)
+        # 按请求顺序重排列而不复制底层数组（reindex会整表复制）。
+        return pd.DataFrame({name: normalized[name] for name in requested}, copy=False)
 
     @staticmethod
     def _physical_columns(
@@ -108,13 +116,21 @@ class L2InputAdapter:
         # frame只在本次读取中使用，直接原位归一化可避免复制整张单日逐笔表。
         result = frame
         if "symbol" in result:
-            non_null_symbols = result["symbol"].dropna()
-            if not non_null_symbols.empty and isinstance(
-                non_null_symbols.iloc[0], (bytes, bytearray)
-            ):
-                result["symbol"] = result["symbol"].map(_decode_text)
-            if not isinstance(result["symbol"].dtype, pd.CategoricalDtype):
-                result["symbol"] = result["symbol"].astype("category")
+            symbol = result["symbol"]
+            if isinstance(symbol.dtype, pd.CategoricalDtype):
+                # 分类列只需检查和解码类别本身，不逐行处理。
+                categories = symbol.cat.categories
+                if len(categories) and isinstance(categories[0], (bytes, bytearray)):
+                    result["symbol"] = symbol.cat.rename_categories(
+                        [_decode_text(value) for value in categories]
+                    )
+            else:
+                non_null_symbols = symbol.dropna()
+                if not non_null_symbols.empty and isinstance(
+                    non_null_symbols.iloc[0], (bytes, bytearray)
+                ):
+                    symbol = symbol.map(_decode_text)
+                result["symbol"] = symbol.astype("category")
 
         needs_time = any(name in requested for name in ("time_ms", "timestamp"))
         if needs_time:

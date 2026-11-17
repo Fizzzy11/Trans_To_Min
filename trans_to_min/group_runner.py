@@ -170,7 +170,10 @@ def _process_one_group_day(
     outputs: dict[str, dict] = {}
     # 读入后、交给业务前登记输入：组内各指标复用同一张输入表的股票全集，只真正计算一次。
     with symbol_universe_scope(inputs):
-        for metric, frame in group.iter_compute_day(trade_date, inputs, metric_names):
+        options = {"config": config} if getattr(group, "stock_separable", False) else {}
+        for metric, frame in group.iter_compute_day(
+            trade_date, inputs, metric_names, **options
+        ):
             if metric.name not in requested:
                 raise RuntimeError(
                     f"指标组{group.name!r}产生了未选择的指标：{metric.name}"
@@ -197,6 +200,8 @@ def _process_one_group_day(
                 config,
             )
             output["price_quality"] = frame.attrs.get("price_quality", {})
+            if "block_stats" in frame.attrs:
+                output["block_stats"] = frame.attrs["block_stats"]
             output["symbols"] = int(frame["symbol"].nunique()) if not frame.empty else 0
             outputs[metric.name] = output
     missing = sorted(requested - set(outputs))
@@ -637,6 +642,7 @@ class MinuteMetricGroupRunner:
         return {
             "status": "running",
             "framework_version": __version__,
+            "framework_module": str(Path(__file__).resolve().parent),
             "metric_group": self.group.name,
             "run_id": run_id,
             "started_at": datetime.now().astimezone().isoformat(),
@@ -671,6 +677,7 @@ class MinuteMetricGroupRunner:
             manifest = {
                 "status": payload["status"],
                 "framework_version": payload["framework_version"],
+                "framework_module": payload["framework_module"],
                 "metric": metric_name,
                 "metric_group": self.group.name,
                 "run_id": payload["run_id"],
