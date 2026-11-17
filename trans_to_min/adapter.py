@@ -55,7 +55,8 @@ class L2InputAdapter:
             raise ValueError("columns 不能为空")
 
         parquet = pq.ParquetFile(path if source is None else source.open())
-        if "symbol" in parquet.schema_arrow.names:
+        source_schema = parquet.schema_arrow
+        if "symbol" in source_schema.names:
             # symbol按字典直接解码为分类，避免先物化上亿个字符串对象；复用已解析的元数据。
             parquet = pq.ParquetFile(
                 path if source is None else source.open(),
@@ -77,7 +78,9 @@ class L2InputAdapter:
         }
         normalized = self._normalize(dataset, frame, requested, metadata, integer_columns)
         # 按请求顺序重排列而不复制底层数组（reindex会整表复制）。
-        return pd.DataFrame({name: normalized[name] for name in requested}, copy=False)
+        result = pd.DataFrame({name: normalized[name] for name in requested}, copy=False)
+        result.attrs["field_info"] = field_info(requested, source_schema)
+        return result
 
     @staticmethod
     def _physical_columns(
@@ -164,6 +167,39 @@ class L2InputAdapter:
             if name in result:
                 result[name] = _to_unsigned_integer(result[name], f"{dataset}.{name}")
         return result
+
+
+_SCALE_KEYS = {"price": b"price_scale", "money": b"money_scale"}
+_DERIVED_SOURCES = {"time_ms": "time", "trade_date": "date", "timestamp": "time"}
+
+
+def field_info(requested: Sequence[str], schema: pa.Schema) -> dict[str, dict]:
+    """各逻辑字段的来源物理类型与缩放（只读元数据，不读数据页）。
+
+    ``physical_type``为来源Parquet字段的Arrow类型文本；``scale``仅在整数编码并按scale
+    缩放为元时给出；``normalized``表示逻辑值已由整数除以scale得到。物理表没有、由价×量
+    派生的金额记为``physical_type="derived"``。
+    """
+
+    metadata = schema.metadata or {}
+    names = set(schema.names)
+    result: dict[str, dict] = {}
+    for name in requested:
+        source = _DERIVED_SOURCES.get(name, name)
+        if source not in names:
+            result[name] = {"physical_type": "derived", "scale": None, "normalized": False}
+            continue
+        physical = schema.field(source).type
+        scale = None
+        if name in _SCALE_KEYS and pa.types.is_integer(physical):
+            raw = metadata.get(_SCALE_KEYS[name])
+            scale = int(raw.decode()) if raw is not None else None
+        result[name] = {
+            "physical_type": str(physical),
+            "scale": scale,
+            "normalized": scale is not None,
+        }
+    return result
 
 
 def _to_unsigned_integer(values: pd.Series, label: str) -> pd.Series:

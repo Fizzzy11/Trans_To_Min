@@ -13,6 +13,8 @@ numpy运算实现这些归约，不做逐行Python回调，也不用哈希分组
 - 浮点求和固定使用``np.add.reduceat``，按段内行顺序累加；输入不得含NaN或无穷。
   缺值行由调用方先筛掉，本模块不把缺值当作0。
 - 计数结果为uint64。
+- 价格、金额等整数编码字段需要原始整数（例如界点比较、整数域精确求和）时，用
+  :func:`raw_integers` 按 ``Block.field_info`` 无损还原，不要自行假设scale。
 """
 
 from __future__ import annotations
@@ -23,6 +25,8 @@ import numpy as np
 
 
 UINT64_MAX = int(np.iinfo(np.uint64).max)
+# 浮点值×scale后不超过该界限时，四舍五入可无损恢复原始整数（误差远小于0.5）。
+RAW_INTEGER_LIMIT = 2**50
 
 __all__ = [
     "Groups",
@@ -37,6 +41,7 @@ __all__ = [
     "max_by",
     "min_by",
     "pack",
+    "raw_integers",
     "runs",
     "sum_by",
 ]
@@ -237,6 +242,33 @@ def pack(*columns) -> np.ndarray:
         packed <<= np.uint64(width)
         packed |= array
     return packed
+
+
+def raw_integers(values, info, *, label: str = "值") -> np.ndarray:
+    """把适配器已除以scale的浮点值无损还原为原始整数（int64）。
+
+    ``info``取自 ``Block.field_info[表][字段]``。只接受整数编码且已缩放（``normalized``）的字段；
+    物理为浮点的字段没有原始整数，直接报错，由业务按自己的口径处理。还原前检查
+    |值×scale|≤2**50，还原后再除以scale须与输入逐位相等，任一不满足即报错，不猜测。
+    缺值行须由调用方先筛掉。
+    """
+
+    if not info or not info.get("normalized") or info.get("scale") is None:
+        raise ValueError(
+            f"{label}不是整数缩放编码（physical_type={None if not info else info.get('physical_type')}），"
+            "没有可还原的原始整数"
+        )
+    scale = int(info["scale"])
+    if not 1 <= scale <= 2**53:
+        raise ValueError(f"{label}的scale={scale}超出可无损还原范围")
+    array = _finite_float(np.asarray(values), label)
+    scaled = array * scale
+    if len(scaled) and float(np.abs(scaled).max()) > RAW_INTEGER_LIMIT:
+        raise OverflowError(f"{label}×scale超过2**50，无法保证无损还原")
+    raw = np.rint(scaled).astype(np.int64)
+    if not np.array_equal(raw.astype(np.float64) / scale, array):
+        raise ValueError(f"{label}与scale={scale}不一致，不是由该scale的整数换算而来")
+    return raw
 
 
 def cell_keys(stock_codes, minutes, minute_count: int = 242) -> np.ndarray:

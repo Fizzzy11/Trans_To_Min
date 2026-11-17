@@ -16,13 +16,14 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 import inspect
 import os
 import re
 import sys
 import types
+from types import MappingProxyType
 
 import numpy as np
 import pandas as pd
@@ -48,12 +49,18 @@ class Block:
     源文件顺序；轴外行的位置不作保证，业务按``minute >= 0``筛选后使用。因此筛选后的
     格键非降序，可直接用kernels的``*_by``函数；按订单号等其他键归约时用``kernels.group``。
     数组均为只读，业务不得原地修改。
+
+    ``field_info[表名][字段名]``为该字段来源的只读编码信息：``physical_type``（Parquet物理
+    类型文本）、``scale``（整数编码的缩放，非整数编码为None）、``normalized``（数组值是否
+    已由整数除以scale得到）。需要原始整数时用 :func:`trans_to_min.kernels.raw_integers`。
     """
 
     trade_date: date
     symbols: tuple[str, ...]
     stock_offset: int
     tables: Mapping[str, Mapping[str, np.ndarray]]
+    field_info: Mapping[str, Mapping[str, Mapping[str, object]]] = field(
+        default_factory=lambda: MappingProxyType({}))
 
     @property
     def stock_count(self) -> int:
@@ -142,11 +149,19 @@ class BlockMetricGroup(MinuteMetricGroup):
                 yield metric, metric._empty_output()
             return
         tables, bounds, stock_reordered = self._stock_tables(inputs, symbols)
+        info = MappingProxyType({
+            dataset: MappingProxyType({
+                name: MappingProxyType(dict(value))
+                for name, value in inputs[dataset].attrs.get("field_info", {}).items()
+                if name != "symbol"
+            })
+            for dataset in self.inputs
+        })
         budget, threads = _block_options(config)
         spans = _block_spans(bounds, len(symbols), budget)
 
         def run(span: tuple[int, int]):
-            return self._run_block(trade_date, symbols, tables, bounds, span, names)
+            return self._run_block(trade_date, symbols, tables, bounds, span, names, info)
 
         if threads <= 1 or len(spans) == 1:
             outcomes = [run(span) for span in spans]
@@ -173,6 +188,7 @@ class BlockMetricGroup(MinuteMetricGroup):
         bounds: dict[str, np.ndarray],
         span: tuple[int, int],
         names: tuple[str, ...],
+        info: Mapping[str, Mapping[str, Mapping[str, object]]],
     ) -> tuple[int, dict[str, CellValues], bool]:
         """在线程内构造一个块（分钟编码、块内顺序检查）并计算、检查结果。"""
 
@@ -202,7 +218,7 @@ class BlockMetricGroup(MinuteMetricGroup):
             for values in view.values():
                 values.flags.writeable = False
             block_tables[dataset] = view
-        block = Block(trade_date, tuple(symbols[start:stop]), start, block_tables)
+        block = Block(trade_date, tuple(symbols[start:stop]), start, block_tables, info)
         return start, self._checked_block(block, names), reordered
 
     def _checked_block(self, block: Block, names: tuple[str, ...]) -> dict[str, CellValues]:
